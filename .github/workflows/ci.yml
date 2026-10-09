@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test/fixtures/expo-app/package-lock.json
+            test/fixtures/bare-rn-app/package-lock.json
+      - run: npm ci
+      - name: Install fixture dependencies
+        run: |
+          npm ci --prefix test/fixtures/expo-app
+          npm ci --prefix test/fixtures/bare-rn-app
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      - run: npm run build
+      - name: Integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration
+      - name: Integration tests on minimum engine (VS Code 1.90.0)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration
+        env:
+          VSCODE_TEST_VERSION: 1.90.0
+      - name: Integration tests
+        if: runner.os != 'Linux'
+        run: npm run test:integration
+
+  package:
+    name: package (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: win32-x64, os: windows-latest, npm_os: win32, npm_cpu: x64 }
+          - { target: win32-arm64, os: windows-latest, npm_os: win32, npm_cpu: arm64 }
+          - { target: linux-x64, os: ubuntu-latest, npm_os: linux, npm_cpu: x64 }
+          - { target: linux-arm64, os: ubuntu-latest, npm_os: linux, npm_cpu: arm64 }
+          - { target: alpine-x64, os: ubuntu-latest, npm_os: linux, npm_cpu: x64, npm_libc: musl }
+          - { target: darwin-x64, os: macos-latest, npm_os: darwin, npm_cpu: x64 }
+          - { target: darwin-arm64, os: macos-latest, npm_os: darwin, npm_cpu: arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies for ${{ matrix.target }}
+        shell: bash
+        run: npm ci --os=${{ matrix.npm_os }} --cpu=${{ matrix.npm_cpu }} ${{ matrix.npm_libc && format('--libc={0}', matrix.npm_libc) || '' }}
+      - run: npm run build
+      - run: npx vsce package --target ${{ matrix.target }} --out rn-lens-${{ matrix.target }}.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rn-lens-${{ matrix.target }}
+          path: rn-lens-${{ matrix.target }}.vsix

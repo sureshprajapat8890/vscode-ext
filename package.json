@@ -1,0 +1,256 @@
+{
+  "name": "rn-lens",
+  "displayName": "RN Lens",
+  "description": "Preview React Native components instantly inside VS Code — no emulator, no simulator, no phone.",
+  "version": "0.0.1",
+  "publisher": "rn-lens",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=22.12.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "react native",
+    "react-native-web",
+    "expo",
+    "preview",
+    "emulator"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/node_modules/react-native/package.json",
+    "workspaceContains:**/node_modules/expo/package.json"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode RN Lens never loads rnlens.config.js and uses only built-in mocks."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "rnLens.openPreview",
+        "title": "Open Preview",
+        "category": "RN Lens",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "rnLens.previewComponent",
+        "title": "Preview Component",
+        "category": "RN Lens"
+      },
+      {
+        "command": "rnLens.previewApp",
+        "title": "Preview App",
+        "category": "RN Lens"
+      },
+      {
+        "command": "rnLens.reload",
+        "title": "Reload",
+        "category": "RN Lens",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rnLens.toggleLock",
+        "title": "Toggle Lock",
+        "category": "RN Lens",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "rnLens.clearCache",
+        "title": "Clear Cache",
+        "category": "RN Lens"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "rnLens.openPreview",
+          "when": "rnLens.isRNProject"
+        },
+        {
+          "command": "rnLens.previewComponent",
+          "when": "false"
+        },
+        {
+          "command": "rnLens.previewApp",
+          "when": "rnLens.isRNProject"
+        },
+        {
+          "command": "rnLens.reload",
+          "when": "rnLens.isRNProject"
+        },
+        {
+          "command": "rnLens.toggleLock",
+          "when": "rnLens.isRNProject"
+        },
+        {
+          "command": "rnLens.clearCache",
+          "when": "rnLens.isRNProject"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "rnLens.openPreview",
+          "when": "resourceLangId =~ /(javascript|typescript)react?/ && rnLens.isRNProject",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "RN Lens",
+      "properties": {
+        "rnLens.updateMode": {
+          "type": "string",
+          "enum": [
+            "onSave",
+            "onType"
+          ],
+          "enumDescriptions": [
+            "Rebuild the preview when a file is saved.",
+            "Rebuild the preview while typing (debounced), using unsaved editor contents."
+          ],
+          "default": "onSave",
+          "description": "When the preview rebuilds."
+        },
+        "rnLens.defaultDevice": {
+          "type": "string",
+          "enum": [
+            "iphone-se",
+            "iphone-15",
+            "iphone-15-pro-max",
+            "pixel-8",
+            "galaxy-s24",
+            "ipad-10"
+          ],
+          "enumDescriptions": [
+            "iPhone SE (375×667)",
+            "iPhone 15 (393×852)",
+            "iPhone 15 Pro Max (430×932)",
+            "Pixel 8 (412×915)",
+            "Galaxy S24 (360×780)",
+            "iPad 10th gen (820×1180)"
+          ],
+          "default": "iphone-15",
+          "description": "Device preset used for new preview panels."
+        },
+        "rnLens.simulatedPlatform": {
+          "type": "string",
+          "enum": [
+            "ios",
+            "android",
+            "web"
+          ],
+          "default": "ios",
+          "description": "Platform reported by Platform.OS and used to resolve .ios.* / .android.* files."
+        },
+        "rnLens.entry": {
+          "type": "string",
+          "default": "",
+          "description": "Override the app entry file used by 'RN Lens: Preview App' (relative to the project root). Leave empty to auto-detect."
+        },
+        "rnLens.extraAliases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Extra module aliases, e.g. `{ \"@app\": \"./src\" }`. Paths are relative to the project root."
+        },
+        "rnLens.networkAllowList": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Origins the preview may `fetch`, e.g. `http://localhost:4000`. Everything else is blocked by the preview's Content Security Policy."
+        },
+        "rnLens.telemetry": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send anonymous usage telemetry. Only takes effect when VS Code telemetry is also enabled."
+        }
+      }
+    },
+    "walkthroughs": [
+      {
+        "id": "rnLens.gettingStarted",
+        "title": "Get started with RN Lens",
+        "description": "Preview React Native components in VS Code without an emulator.",
+        "steps": [
+          {
+            "id": "openPreview",
+            "title": "Open a preview",
+            "description": "Open any component file (for example `components/Button.tsx`) and click **▶ Preview** above the component, or use the eye icon in the editor title bar.\n[Open Preview](command:rnLens.openPreview)",
+            "media": {
+              "markdown": "media/walkthrough/open-preview.md"
+            },
+            "completionEvents": [
+              "onCommand:rnLens.openPreview",
+              "onCommand:rnLens.previewComponent"
+            ]
+          },
+          {
+            "id": "addVariant",
+            "title": "Add a variant",
+            "description": "Create `<Name>.preview.tsx` next to your component. Every named export becomes a variant in the preview toolbar.",
+            "media": {
+              "markdown": "media/walkthrough/add-variant.md"
+            },
+            "completionEvents": [
+              "onContext:rnLens.hasVariants"
+            ]
+          },
+          {
+            "id": "addDecorator",
+            "title": "Wrap previews in your providers",
+            "description": "Create `.rnlens/decorators.tsx` that default-exports a component rendering your theme, store, or navigation providers around `children`.",
+            "media": {
+              "markdown": "media/walkthrough/add-decorator.md"
+            },
+            "completionEvents": [
+              "onContext:rnLens.hasDecorators"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.extension.mjs --production",
+    "watch": "node esbuild.extension.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "pretest:integration": "node esbuild.extension.mjs && node esbuild.extension.mjs --tests",
+    "test:integration": "node out/test/integration/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/mocha": "10.0.10",
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.90.0",
+    "@vitest/coverage-v8": "5.0.3",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.0.0",
+    "esbuild": "0.28.2",
+    "eslint": "10.12.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.13.0",
+    "mocha": "11.8.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1",
+    "vitest": "5.0.3"
+  }
+}

@@ -1,0 +1,9 @@
+dist
+out
+coverage
+vendor
+.vscode-test
+node_modules
+test/fixtures
+package-lock.json
+*.md

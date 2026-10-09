@@ -1,0 +1,10 @@
+**
+!dist/**
+!vendor/**
+!media/**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!node_modules/esbuild/**
+!node_modules/@esbuild/**
