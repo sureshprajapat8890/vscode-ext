@@ -1,7 +1,11 @@
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as vscode from 'vscode';
 import { Uri, mockState } from '../vscodeMock';
 import { ProjectRegistry } from '../../../src/project/projectRegistry';
+
+/** The mock Uri stands in for vscode.Uri at runtime (vitest aliases `vscode` to the mock). */
+const fileUri = (p: string): vscode.Uri => Uri.file(p) as unknown as vscode.Uri;
 
 const root = path.resolve('/ws');
 const app = path.join(root, 'app');
@@ -83,6 +87,24 @@ describe('ProjectRegistry', () => {
     mockState.workspaceFoldersChanged.fire({});
     await vi.advanceTimersByTimeAsync(1000);
     expect(mockState.findFilesCalls).toHaveLength(1);
+  });
+
+  it('projectFor finds the project within the file’s workspace folder', async () => {
+    mockState.workspaceFolders = [{ uri: Uri.file(root) }];
+    mockState.files.set(path.join(app, 'package.json'), expoPkg);
+    const project = await registry.projectFor(fileUri(path.join(app, 'src', 'Button.tsx')));
+    expect(project?.root).toBe(app);
+    expect(await registry.projectFor(fileUri(path.join(root, 'other', 'x.tsx')))).toBeUndefined();
+  });
+
+  it('projectFor searches up to the filesystem root for files outside the workspace', async () => {
+    mockState.files.set(path.join(app, 'package.json'), expoPkg);
+    expect((await registry.projectFor(fileUri(path.join(app, 'A.tsx'))))?.root).toBe(app);
+  });
+
+  it('projectFor ignores non-file URIs', async () => {
+    const untitled = Uri.from({ scheme: 'untitled', path: 'Untitled-1' }) as unknown as vscode.Uri;
+    expect(await registry.projectFor(untitled)).toBeUndefined();
   });
 
   it('disposes the watcher and cancels a pending rescan', async () => {

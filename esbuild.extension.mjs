@@ -1,4 +1,4 @@
-// Builds the extension host bundle (and, with --tests, the integration test bundles).
+// Builds the extension host and webview bundles (or, with --tests, the integration test bundles).
 import * as esbuild from 'esbuild';
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -16,8 +16,22 @@ const extensionOptions = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
+  // esbuild is loaded lazily at runtime from node_modules (it ships native binaries).
   external: ['vscode', 'esbuild'],
   sourcemap: !production,
+  minify: production,
+  logLevel: 'info',
+};
+
+/** @type {import('esbuild').BuildOptions} */
+const webviewOptions = {
+  entryPoints: { webview: 'webview/main.ts' },
+  outdir: 'dist',
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  sourcemap: production ? false : 'inline',
   minify: production,
   logLevel: 'info',
 };
@@ -42,11 +56,13 @@ const testOptions = {
   logLevel: 'info',
 };
 
-const options = tests ? testOptions : extensionOptions;
+const builds = tests ? [testOptions] : [extensionOptions, webviewOptions];
 
 if (watch) {
-  const ctx = await esbuild.context(options);
-  await ctx.watch();
+  for (const options of builds) {
+    const ctx = await esbuild.context(options);
+    await ctx.watch();
+  }
 } else {
-  await esbuild.build(options);
+  await Promise.all(builds.map((options) => esbuild.build(options)));
 }

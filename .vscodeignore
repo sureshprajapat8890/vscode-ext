@@ -8,3 +8,4 @@
 !LICENSE
 !node_modules/esbuild/**
 !node_modules/@esbuild/**
+dist/**/*.map

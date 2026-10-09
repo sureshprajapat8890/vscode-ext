@@ -1,0 +1,5 @@
+{
+  "name": "hello-project",
+  "private": true,
+  "dependencies": { "react-native": "0.86.3" }
+}

@@ -1,0 +1,205 @@
+:root {
+  --bezel: 12px;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  min-height: 28px;
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  background: var(--vscode-editorWidget-background);
+}
+
+.toolbar .device-name {
+  font-weight: 600;
+}
+
+.toolbar .status {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar .status.error {
+  color: var(--vscode-errorForeground);
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Takes the scaled size of the frame so layout and centering follow the zoom. */
+.frame-holder {
+  position: relative;
+  flex: none;
+}
+
+.frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  padding: var(--bezel);
+  border-radius: calc(var(--radius) + var(--bezel));
+  background: #1c1c1e;
+  box-shadow:
+    0 0 0 1px #3a3a3c,
+    0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.screen {
+  position: relative;
+  width: var(--device-w);
+  height: var(--device-h);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #ffffff;
+  color: #000000;
+  color-scheme: light;
+}
+
+#rn-root {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.rn-mount {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.status-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--status-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px 0 40px;
+  box-sizing: border-box;
+  font:
+    600 15px -apple-system,
+    system-ui,
+    sans-serif;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.status-bar .icons {
+  letter-spacing: 2px;
+  font-size: 12px;
+}
+
+.island {
+  position: absolute;
+  top: 11px;
+  left: 50%;
+  width: 125px;
+  height: 37px;
+  margin-left: -62.5px;
+  border-radius: 20px;
+  background: #000000;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.home-indicator {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  width: 134px;
+  height: 5px;
+  margin-left: -67px;
+  border-radius: 3px;
+  background: #000000;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, transparent);
+  z-index: 10;
+}
+
+.overlay[hidden] {
+  display: none;
+}
+
+.overlay-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overlay-title {
+  margin: 0;
+  font-size: 1.1em;
+  color: var(--vscode-errorForeground);
+}
+
+.overlay-dismiss {
+  margin-left: auto;
+  border: 1px solid var(--vscode-button-border, transparent);
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.overlay-dismiss:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.overlay-body {
+  margin: 12px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+}
+
+.disclaimer {
+  padding: 4px 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}

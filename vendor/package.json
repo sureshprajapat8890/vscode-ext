@@ -1,0 +1,10 @@
+{
+  "name": "rn-lens-vendor",
+  "private": true,
+  "description": "Fallback runtime packages bundled into previews when the project does not provide them.",
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-native-web": "0.21.4"
+  }
+}

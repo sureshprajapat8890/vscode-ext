@@ -50,7 +50,13 @@ export const mockState = {
   contextKeys: new Map<string, unknown>(),
   watchers: [] as MockWatcher[],
   workspaceFoldersChanged: new EventEmitter<unknown>(),
+  workspaceFolders: [] as { uri: Uri }[],
   logLines: [] as string[],
+  logShown: false,
+  commands: new Map<string, (...args: never[]) => unknown>(),
+  messages: [] as { level: 'warning' | 'error'; text: string; items: string[] }[],
+  /** Item returned by the next showErrorMessage / showWarningMessage call. */
+  nextMessageChoice: undefined as string | undefined,
   reset(): void {
     this.files.clear();
     this.foundFiles = [];
@@ -58,9 +64,19 @@ export const mockState = {
     this.contextKeys.clear();
     this.watchers = [];
     this.workspaceFoldersChanged = new EventEmitter<unknown>();
+    this.workspaceFolders = [];
     this.logLines = [];
+    this.logShown = false;
+    this.commands.clear();
+    this.messages = [];
+    this.nextMessageChoice = undefined;
   },
 };
+
+function isInside(parent: string, child: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/$/, '');
+  return norm(child) === norm(parent) || norm(child).startsWith(`${norm(parent)}/`);
+}
 
 export const workspace = {
   createFileSystemWatcher(pattern: string) {
@@ -88,6 +104,9 @@ export const workspace = {
   onDidChangeWorkspaceFolders(listener: Listener<unknown>) {
     return mockState.workspaceFoldersChanged.event(listener);
   },
+  getWorkspaceFolder(uri: Uri) {
+    return mockState.workspaceFolders.find((f) => isInside(f.uri.fsPath, uri.fsPath));
+  },
   fs: {
     async readFile(uri: Uri): Promise<Uint8Array> {
       const text = mockState.files.get(uri.fsPath);
@@ -103,10 +122,22 @@ export const commands = {
   async executeCommand(command: string, ...args: unknown[]): Promise<unknown> {
     if (command === 'setContext') {
       mockState.contextKeys.set(args[0] as string, args[1]);
+      return undefined;
     }
-    return undefined;
+    return mockState.commands.get(command)?.(...(args as never[]));
+  },
+  registerCommand(command: string, handler: (...args: never[]) => unknown) {
+    mockState.commands.set(command, handler);
+    return { dispose: () => mockState.commands.delete(command) };
   },
 };
+
+const showMessage =
+  (level: 'warning' | 'error') =>
+  async (text: string, ...items: string[]): Promise<string | undefined> => {
+    mockState.messages.push({ level, text, items });
+    return mockState.nextMessageChoice;
+  };
 
 const record =
   (level: string) =>
@@ -115,6 +146,8 @@ const record =
   };
 
 export const window = {
+  showWarningMessage: showMessage('warning'),
+  showErrorMessage: showMessage('error'),
   createOutputChannel(name: string) {
     return {
       name,
@@ -124,7 +157,9 @@ export const window = {
       debug: record('debug'),
       trace: record('trace'),
       appendLine: record('line'),
-      show: () => undefined,
+      show: () => {
+        mockState.logShown = true;
+      },
       dispose: () => undefined,
     };
   },

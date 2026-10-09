@@ -12,6 +12,7 @@ export default tseslint.config(
       'vendor/**',
       '.vscode-test/**',
       'test/fixtures/**',
+      'test/unit/fixtures/**',
     ],
   },
   js.configs.recommended,
@@ -22,6 +23,10 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/consistent-type-imports': 'error',
     },
+  },
+  {
+    files: ['webview/**/*.ts'],
+    languageOptions: { globals: globals.browser },
   },
   {
     files: ['**/*.mjs', '**/*.js'],

@@ -1,5 +1,6 @@
+import path from 'node:path';
 import * as vscode from 'vscode';
-import { detectProjects, type RNProject } from './detectProject';
+import { detectProjects, findProjectRoot, type RNProject } from './detectProject';
 import { getLog } from '../util/log';
 
 const CONTEXT_KEY = 'rnLens.isRNProject';
@@ -47,6 +48,19 @@ export class ProjectRegistry implements vscode.Disposable {
 
   getProjects(): readonly RNProject[] {
     return this.projects;
+  }
+
+  /**
+   * The RN project containing `uri`: the nearest package.json declaring react-native or expo,
+   * searching up to the file's workspace folder (or the filesystem root for loose files).
+   */
+  projectFor(uri: vscode.Uri): Promise<RNProject | undefined> {
+    if (uri.scheme !== 'file') {
+      return Promise.resolve(undefined);
+    }
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const stopAt = folder?.uri.fsPath ?? path.parse(uri.fsPath).root;
+    return findProjectRoot(uri.fsPath, stopAt, readWorkspaceFile);
   }
 
   /** Re-scans the workspace. Concurrent calls share one scan. */

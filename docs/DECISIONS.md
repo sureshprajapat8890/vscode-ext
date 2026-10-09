@@ -43,3 +43,45 @@ When tests are launched from a VS Code terminal this variable is inherited and t
 ### D-8. Walkthrough completion events use context keys set in later phases
 
 The "Add a variant" and "Add a decorator" steps complete on `rnLens.hasVariants` / `rnLens.hasDecorators`, which Phase 2 sets when it discovers those files. Until then the steps can be marked done manually.
+
+## Phase 1
+
+### D-9. React and React DOM are chosen as a pair
+
+React 19's React DOM throws unless `react` has exactly the same version. `resolveRuntimeDeps` uses the project's `react` + `react-dom` only when both are installed with identical versions; otherwise both come from `vendor/` (pinned 19.2.8). It logs why, and warns on a major-version mismatch (PRD B-13). The Expo template has `react` but no `react-dom`, so a fresh Expo app previews with the vendor pair. react-native-web is chosen separately (project copy if installed).
+
+### D-10. Vendor fallback via esbuild `nodePaths`, not a resolve plugin
+
+BUILD_PROMPT says "nodePaths: none … vendor/node_modules as fallback via a resolve plugin". A plugin that retries every failed bare import would run on every import in the bundle. esbuild's `nodePaths` already has exactly the fallback semantics we need: it's searched only after the normal `node_modules` walk. React and react-native-web are still pinned by the `singleReact` / `rnAlias` plugins, so `nodePaths` never decides which React is used.
+
+### D-11. External source maps kept in the extension host
+
+BUILD_PROMPT lists `sourcemap: 'inline'`. We emit `sourcemap: 'external'` (`write: false`) instead. The map stays in the extension host, where Phase 2 maps runtime stack frames. Only the code goes to the webview, so a multi-megabyte base64 map isn't re-sent on every rebuild.
+
+### D-12. Component detection pulled forward from Phase 2
+
+"Default export, else the first exported component" needs source order, which module namespaces don't preserve. So the `@babel/parser` detector specified for CodeLens is implemented now and used by Open Preview. Phase 2's CodeLens provider reuses it.
+
+### D-13. One preview panel in Phase 1
+
+Multiple panels are R-11 (P2, Phase 4). Opening a preview for another component retargets the existing panel and releases the previous esbuild context. The panel uses `retainContextWhenHidden` so hiding it doesn't discard the rendered tree.
+
+### D-14. Unmounting uses the root returned by `runApplication`
+
+react-native-web 0.21's `AppRegistry.unmountApplicationComponentAtRootTag(el)` calls `el.unmount()`, which doesn't exist on a DOM element under React 19. The virtual entry keeps the root returned by `runApplication` and exposes `globalThis.__RNLENS_UNMOUNT__`. The webview calls it before running the next bundle, and mounts each bundle into a fresh element.
+
+### D-15. A minimal `process` shim
+
+Many RN packages read `process.env.*` at runtime. `NODE_ENV` and `EXPO_OS` are replaced at build time via `define`; a one-line banner provides `globalThis.process = { env: { NODE_ENV } }` for the rest.
+
+### D-16. esbuild is a runtime dependency
+
+The extension loads esbuild lazily on the first preview, as an external module, because it ships a platform-specific native binary. It moves from devDependencies to dependencies so `vsce` packages it. CI builds one VSIX per platform target with the matching binary.
+
+### D-17. Vendor packages installed by `postinstall`
+
+`vendor/package.json` + `package-lock.json` are committed; `vendor/node_modules` is git-ignored and installed by the root `postinstall` script (`npm ci --prefix vendor --ignore-scripts`). The packaged VSIX includes it.
+
+### D-18. Not yet handled (later phases)
+
+`react-native/*` sub-path imports, images/fonts, Flow-typed packages and native modules still fail with esbuild's error in the overlay. These are Phase 2 (assets, flowStrip, mocks) and Phase 3 (autoMock).

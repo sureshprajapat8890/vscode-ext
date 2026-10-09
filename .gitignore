@@ -4,3 +4,4 @@ out/
 coverage/
 .vscode-test/
 *.vsix
+vendor/node_modules/
