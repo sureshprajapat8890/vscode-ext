@@ -88,6 +88,9 @@ describe('Phase 2 — reference components', function () {
     await waitForSnapshot(api, has('Hi Dr. Lovelace (ocean)'));
     await testing(api).selectVariant('Casual');
     await waitForSnapshot(api, has('Hi Ada (ocean)'));
+    // From `export const previews = { Named: { name: 'Grace' } }` in Greeting.tsx itself.
+    await testing(api).selectVariant('Named');
+    await waitForSnapshot(api, has('Hi Grace (ocean)'));
     await testing(api).selectVariant(null);
     await waitForSnapshot(api, has('Hi world (ocean)'));
   });

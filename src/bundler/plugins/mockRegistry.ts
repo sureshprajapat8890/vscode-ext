@@ -13,6 +13,8 @@ export interface MockUse {
   /** Absolute path of the mock module used (empty for auto-mocks). */
   file: string;
   note?: string;
+  /** Files that imported the specifier (used to place "Create mock" diagnostics). */
+  importers: string[];
 }
 
 export interface MockRegistryOptions {
@@ -21,6 +23,10 @@ export interface MockRegistryOptions {
   mocksDir: string;
   /** Preview runtime directory (provides the auto-mock implementation). */
   runtimeDir: string;
+  /** `mocks` from rnlens.config.js (specifier → absolute file), checked after `.rnlens/mocks/`. */
+  configMocks?: Readonly<Record<string, string>>;
+  /** Specifiers to auto-mock because they couldn't be resolved in an earlier build. */
+  unresolved?: ReadonlySet<string>;
 }
 
 const AUTO_NAMESPACE = 'rnlens-automock';
@@ -96,18 +102,38 @@ export function mockRegistryPlugin(options: MockRegistryOptions): {
   used(): MockUse[];
 } {
   const projectMocks = findProjectMocks(options.projectRoot);
-  const names = new Set<string>([...projectMocks.keys(), ...BUILT_IN_MOCKS.map((m) => m.name)]);
+  for (const [specifier, file] of Object.entries(options.configMocks ?? {})) {
+    if (!projectMocks.has(specifier)) projectMocks.set(specifier, file);
+  }
+  const unresolved = options.unresolved ?? new Set<string>();
+  const names = new Set<string>([
+    ...projectMocks.keys(),
+    ...BUILT_IN_MOCKS.map((m) => m.name),
+    ...unresolved,
+  ]);
   const subpathNames = BUILT_IN_MOCKS.filter((m) => m.subpaths).map((m) => m.name);
   const alternatives = new Map<string, string | undefined>();
   let used = new Map<string, MockUse>();
 
-  const mockFilter = new RegExp(
-    `^(?:${[...names].map(escapeRegExp).join('|')}|(?:${subpathNames.map(escapeRegExp).join('|') || '(?!)'})/.+)$`,
-  );
+  // esbuild filters use Go's RE2 (no lookaheads), so only include the alternatives that exist.
+  const alternativesPattern = [
+    ...[...names].map(escapeRegExp),
+    ...subpathNames.map((n) => `${escapeRegExp(n)}/.+`),
+  ].join('|');
+  const mockFilter = new RegExp(`^(?:${alternativesPattern})$`);
   const builtinFilter = new RegExp(`^(?:${BARE_BUILTINS.map(escapeRegExp).join('|')})(?:/.*)?$`);
 
-  const autoMock = (specifier: string, note: string) => {
-    used.set(specifier, { specifier, source: 'auto', file: '', note });
+  const record = (use: Omit<MockUse, 'importers'>, importer: string): void => {
+    const existing = used.get(use.specifier);
+    if (existing) {
+      if (importer && !existing.importers.includes(importer)) existing.importers.push(importer);
+    } else {
+      used.set(use.specifier, { ...use, importers: importer ? [importer] : [] });
+    }
+  };
+
+  const autoMock = (specifier: string, note: string, importer: string) => {
+    record({ specifier, source: 'auto', file: '', note }, importer);
     return { path: specifier, namespace: AUTO_NAMESPACE };
   };
 
@@ -124,12 +150,16 @@ export function mockRegistryPlugin(options: MockRegistryOptions): {
 
         const projectMock = projectMocks.get(specifier);
         if (projectMock) {
-          used.set(specifier, { specifier, source: 'project', file: projectMock });
+          record({ specifier, source: 'project', file: projectMock }, args.importer);
           return { path: projectMock };
         }
 
         const builtIn = builtInFor(specifier);
-        if (!builtIn) return undefined;
+        if (!builtIn) {
+          return unresolved.has(specifier)
+            ? autoMock(specifier, 'not installed (could not be resolved)', args.importer)
+            : undefined;
+        }
 
         const alternative = PREFERRED_ALTERNATIVES[builtIn.name];
         if (alternative) {
@@ -144,7 +174,7 @@ export function mockRegistryPlugin(options: MockRegistryOptions): {
         }
 
         const file = path.join(options.mocksDir, builtIn.file);
-        used.set(specifier, { specifier, source: 'built-in', file, note: builtIn.note });
+        record({ specifier, source: 'built-in', file, note: builtIn.note }, args.importer);
         return { path: file };
       });
 
@@ -153,19 +183,27 @@ export function mockRegistryPlugin(options: MockRegistryOptions): {
         if (isRedirected(args)) return undefined;
         const projectMock = projectMocks.get(args.path);
         if (projectMock) {
-          used.set(args.path, { specifier: args.path, source: 'project', file: projectMock });
+          record({ specifier: args.path, source: 'project', file: projectMock }, args.importer);
           return { path: projectMock };
         }
-        return autoMock(args.path, 'React Native internal with no web implementation');
+        return autoMock(
+          args.path,
+          'React Native internal with no web implementation',
+          args.importer,
+        );
       });
 
       // Node built-ins don't exist in the browser: `node:*` always, bare names unless a browser
       // polyfill package (e.g. `buffer`, `events`) is installed.
-      build.onResolve({ filter: /^node:/ }, (args) => autoMock(args.path, 'Node.js built-in'));
+      build.onResolve({ filter: /^node:/ }, (args) =>
+        autoMock(args.path, 'Node.js built-in', args.importer),
+      );
       build.onResolve({ filter: builtinFilter }, async (args) => {
         if (isRedirected(args) || names.has(args.path)) return undefined;
         const polyfill = await resolveRaw(build, args.path, args.resolveDir, args.kind);
-        return polyfill.errors.length === 0 ? undefined : autoMock(args.path, 'Node.js built-in');
+        return polyfill.errors.length === 0
+          ? undefined
+          : autoMock(args.path, 'Node.js built-in', args.importer);
       });
 
       build.onLoad({ filter: /.*/, namespace: AUTO_NAMESPACE }, (args) => ({

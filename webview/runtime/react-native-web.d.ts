@@ -32,4 +32,8 @@ declare module 'react-native-web' {
   export const Dimensions: object;
   export const Appearance: object;
   export const NativeModules: object;
+  export const Animated: object;
+  export const Platform: { OS: string; select<T>(spec: Record<string, T>): T | undefined };
+  export const DeviceEventEmitter: object;
+  export const SectionList: ComponentType<Record<string, unknown>>;
 }

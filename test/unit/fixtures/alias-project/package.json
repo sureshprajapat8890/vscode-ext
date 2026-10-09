@@ -1,0 +1,1 @@
+{ "name": "alias-project", "private": true, "main": "expo-router/entry", "dependencies": { "expo": "*", "expo-router": "*" } }

@@ -1,12 +1,18 @@
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { BundlerService } from './bundler/BundlerService';
+import type { PreviewTarget, SimulatedPlatform } from './bundler/types';
 import {
   COMPONENT_SELECTOR,
   ComponentCodeLensProvider,
 } from './codelens/ComponentCodeLensProvider';
 import { detectComponents, pickDefaultComponent } from './codelens/componentDetection';
+import { MockDiagnostics } from './diagnostics/mockDiagnostics';
+import { loadProjectConfig } from './project/config';
 import type { RNProject } from './project/detectProject';
+import { collectImportUsage, generateMockStub, mockFilePath } from './project/mockStub';
 import { ProjectRegistry } from './project/projectRegistry';
 import {
   PREVIEW_VIEW_TYPE,
@@ -17,7 +23,7 @@ import {
 import { isPanelTarget } from './preview/protocol';
 import { PreviewStatusBar } from './preview/statusBar';
 import { UserError } from './util/errors';
-import { disposeLog, getLog } from './util/log';
+import { disposeLog, getLog, recentLogLines } from './util/log';
 import { safeCommand } from './util/safeCommand';
 
 const PREVIEWABLE_LANGUAGES = new Set([
@@ -36,11 +42,16 @@ export interface RNLensApi {
   testing?: {
     snapshot(): Promise<PreviewSnapshot | undefined>;
     clickOverlayFrame(index: number): void;
+    press(text: string): void;
     selectVariant(name: string | null): Promise<void>;
+    setPlatform(platform: SimulatedPlatform): Promise<void>;
+    currentTarget(): PreviewTarget | undefined;
+    isLocked(): boolean;
     buildTimes(): readonly number[];
     setEnv(env: PreviewEnvOverride): void;
     contextCount(): number;
     closePreview(): Promise<void>;
+    recentLog(): readonly string[];
   };
 }
 
@@ -51,6 +62,23 @@ function componentLabel(
 ): string {
   if (exportName !== 'default') return exportName;
   return localName ?? path.basename(file.fsPath, path.extname(file.fsPath));
+}
+
+/** Unsaved contents of a project file open in the editor, in `onType` mode. */
+function readUnsaved(file: string): string | undefined {
+  if (
+    vscode.workspace.getConfiguration('rnLens').get<string>('updateMode', 'onSave') !== 'onType'
+  ) {
+    return undefined;
+  }
+  const normalized = path.normalize(file).toLowerCase();
+  const doc = vscode.workspace.textDocuments.find(
+    (d) =>
+      d.isDirty &&
+      d.uri.scheme === 'file' &&
+      path.normalize(d.uri.fsPath).toLowerCase() === normalized,
+  );
+  return doc?.getText();
 }
 
 export function activate(context: vscode.ExtensionContext): RNLensApi {
@@ -65,21 +93,46 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
     runtimeDir: vscode.Uri.joinPath(dist, 'runtime').fsPath,
     mocksDir: vscode.Uri.joinPath(dist, 'mocks').fsPath,
     cacheDir,
+    resolveProjectConfig: (projectRoot) =>
+      loadProjectConfig(projectRoot, {
+        extraAliases: vscode.workspace
+          .getConfiguration('rnLens')
+          .get<Record<string, unknown>>('extraAliases', {}),
+        trusted: vscode.workspace.isTrusted,
+      }),
+    readUnsaved,
     onDepsWarning: (message) => log.warn(message),
+    onProjectNote: (message) => log.info(message),
   });
   const status = new PreviewStatusBar();
+  const mockDiagnostics = new MockDiagnostics();
   const previews = new PreviewPanelManager(
     context.extensionUri,
     cacheDir,
     bundler,
     projects,
     status,
+    (projectRoot, mocked) => {
+      mockDiagnostics
+        .update(projectRoot, mocked)
+        .catch((err: unknown) => log.warn('Updating mock diagnostics failed', err));
+    },
   );
   const codeLenses = new ComponentCodeLensProvider(projects);
+
   context.subscriptions.push(
     status,
+    mockDiagnostics,
     vscode.languages.registerCodeLensProvider(COMPONENT_SELECTOR, codeLenses),
+    vscode.languages.registerCodeActionsProvider(COMPONENT_SELECTOR, mockDiagnostics, {
+      providedCodeActionKinds: MockDiagnostics.providedCodeActionKinds,
+    }),
     vscode.workspace.onDidCloseTextDocument((doc) => codeLenses.forget(doc)),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      // rnlens.config.js may now be loaded.
+      for (const p of projects.getProjects()) bundler.invalidateProject(p.root);
+      if (previews.isOpen) previews.reload().catch(() => undefined);
+    }),
     vscode.window.registerWebviewPanelSerializer(PREVIEW_VIEW_TYPE, {
       async deserializeWebviewPanel(panel, state: unknown) {
         const target = (state as { target?: unknown } | undefined)?.target;
@@ -138,6 +191,55 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
       await previews.show({ file, exportName, label: componentLabel(file, exportName, undefined) });
     }),
 
+    safeCommand('rnLens.previewApp', (uri?: vscode.Uri) =>
+      previews.showApp(
+        uri instanceof vscode.Uri ? uri : vscode.window.activeTextEditor?.document.uri,
+      ),
+    ),
+
+    safeCommand('rnLens.toggleLock', async () => {
+      if (!previews.isOpen) {
+        throw new UserError(
+          'No RN Lens preview is open, so there is nothing to lock. Open a preview first.',
+        );
+      }
+      const locked = await previews.toggleLock();
+      void vscode.window.setStatusBarMessage(
+        locked ? 'RN Lens: preview locked' : 'RN Lens: preview follows the active editor',
+        3000,
+      );
+    }),
+
+    safeCommand('rnLens.createMock', async (uri: vscode.Uri, specifier: string) => {
+      if (!(uri instanceof vscode.Uri) || typeof specifier !== 'string') {
+        throw new UserError(
+          '"Create mock" needs a file and a package name; use the quick fix on the RN Lens warning.',
+        );
+      }
+      const project = await projects.projectFor(uri);
+      if (!project) {
+        throw new UserError(
+          `${path.basename(uri.fsPath)} isn't inside a React Native or Expo project.`,
+        );
+      }
+      const existing = ['.tsx', '.ts'].map((ext) =>
+        mockFilePath(project.root, specifier, ext === '.tsx'),
+      );
+      const found = existing.find((f) => existsSync(f));
+      if (found) {
+        await vscode.window.showTextDocument(vscode.Uri.file(found));
+        return;
+      }
+      const usage = collectImportUsage([await readFile(uri.fsPath, 'utf8')], specifier);
+      const stub = generateMockStub(specifier, usage);
+      const file = mockFilePath(project.root, specifier, stub.tsx);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, stub.source, { flag: 'wx' });
+      log.info(`Created ${file}`);
+      await vscode.window.showTextDocument(vscode.Uri.file(file));
+      if (previews.isOpen) await previews.reload();
+    }),
+
     safeCommand('rnLens.reload', () => previews.reload()),
 
     safeCommand('rnLens.clearCache', async () => {
@@ -158,11 +260,16 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
     api.testing = {
       snapshot: () => previews.snapshot(),
       clickOverlayFrame: (index) => previews.clickOverlayFrame(index),
+      press: (text) => previews.press(text),
       selectVariant: (name) => previews.selectVariantForTest(name),
+      setPlatform: (platform) => previews.setPlatform(platform),
+      currentTarget: () => previews.currentTarget,
+      isLocked: () => previews.isLocked,
       buildTimes: () => previews.buildTimes,
       setEnv: (env) => previews.setEnv(env),
       contextCount: () => bundler.contextCount,
       closePreview: () => previews.close(),
+      recentLog: () => recentLogLines(),
     };
   }
   return api;

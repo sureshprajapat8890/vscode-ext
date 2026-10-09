@@ -8,10 +8,14 @@ import {
   type BuildMessage,
   type BundleKey,
   type MockedPackage,
+  type PreviewTarget,
   type SimulatedPlatform,
+  type VariantRef,
 } from '../bundler/types';
 import { findDecorators } from '../bundler/virtualEntry';
+import { detectComponents, pickDefaultComponent } from '../codelens/componentDetection';
 import { BundleSourceMap } from '../diagnostics/sourceMaps';
+import { detectAppEntry } from '../project/appEntry';
 import { isWithin } from '../project/detectProject';
 import type { ProjectRegistry } from '../project/projectRegistry';
 import { UserError } from '../util/errors';
@@ -26,12 +30,20 @@ import {
   type WebviewMessage,
 } from './protocol';
 import type { PreviewStatusBar } from './statusBar';
-import { findVariantFile, listVariants } from './variants';
+import { findVariantFile, listAllVariants, type VariantInfo } from './variants';
 
 export const PREVIEW_VIEW_TYPE = 'rnLens.preview';
 const SNAPSHOT_TIMEOUT_MS = 2000;
 /** Recent bundles remembered so late runtime errors can still be mapped. */
 const BUNDLES_KEPT = 2;
+const TYPE_DEBOUNCE_MS = 300;
+const FOLLOW_DEBOUNCE_MS = 250;
+const PREVIEWABLE_LANGUAGES = new Set([
+  'javascript',
+  'javascriptreact',
+  'typescript',
+  'typescriptreact',
+]);
 
 export interface PreviewRequest {
   file: vscode.Uri;
@@ -59,7 +71,20 @@ interface Current {
   key: BundleKey;
   label: string;
   variantFile: string | undefined;
-  variants: string[];
+  variants: VariantInfo[];
+}
+
+/** The bundle reference for a variant chosen by name, if the component has one by that name. */
+function variantRef(
+  name: string | null | undefined,
+  variants: readonly VariantInfo[],
+  variantFile: string | undefined,
+  componentFile: string,
+): VariantRef | undefined {
+  const info = name ? variants.find((v) => v.name === name) : undefined;
+  if (!info) return undefined;
+  if (info.kind === 'props') return { kind: 'props', file: componentFile, name: info.name };
+  return variantFile ? { kind: 'file', file: variantFile, name: info.name } : undefined;
 }
 
 function formatBuildMessage(m: BuildMessage): string {
@@ -70,9 +95,10 @@ function formatBuildMessage(m: BuildMessage): string {
 const isInNodeModules = (file: string): boolean => file.split(/[\\/]/).includes('node_modules');
 
 /** Files whose change requires a fresh esbuild context rather than an incremental rebuild. */
-function needsReload(projectRoot: string, file: string): boolean {
+export function needsReload(projectRoot: string, file: string): boolean {
   const base = path.basename(file);
-  if (base === 'package.json' || base === 'app.json' || base === 'tsconfig.json') return true;
+  if (['package.json', 'app.json', 'tsconfig.json'].includes(base)) return true;
+  if (/^(?:babel\.config|\.babelrc|rnlens\.config)(?:\.[cm]?js|\.json)?$/.test(base)) return true;
   if (base === '.env' || base.startsWith('.env.')) return true;
   // A new platform-specific file changes which imports the context must intercept.
   if (/\.(?:ios|android|native)\.(?:tsx|ts|jsx|js)$/.test(base)) return true;
@@ -83,15 +109,22 @@ function mockSummary(mocked: readonly MockedPackage[]): string {
   return mocked
     .map((m) =>
       m.source === 'project'
-        ? `${m.specifier} (your mock in .rnlens/mocks)`
-        : `${m.specifier} (built-in mock${m.note ? `: ${m.note}` : ''})`,
+        ? `${m.specifier} (your mock)`
+        : m.source === 'auto'
+          ? `${m.specifier} (no-op auto-mock${m.note ? `: ${m.note}` : ''})`
+          : `${m.specifier} (built-in mock${m.note ? `: ${m.note}` : ''})`,
     )
     .join(', ');
 }
 
+const settings = () => vscode.workspace.getConfiguration('rnLens');
+const settingPlatform = (): SimulatedPlatform =>
+  settings().get<SimulatedPlatform>('simulatedPlatform', 'ios');
+
 /**
  * Owns the preview webview panel: builds the current target, delivers bundles to the webview,
- * maps runtime errors to source, and rebuilds when files in the previewed project are saved.
+ * maps runtime errors to source, rebuilds on save (or while typing), follows the active editor
+ * unless locked, and reacts to settings.
  */
 export class PreviewPanelManager implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
@@ -103,6 +136,13 @@ export class PreviewPanelManager implements vscode.Disposable {
   private snapshotSeq = 0;
   private lastMockSummary = '';
   private successfulBuildTimes: number[] = [];
+  /** Simulated platform of the open panel (toolbar toggle; follows the setting when it changes). */
+  private platform: SimulatedPlatform = settingPlatform();
+  private locked = false;
+  /** File opened from the error overlay: don't retarget the preview to it. */
+  private ignoreFollowFor: string | undefined;
+  private typeTimer: ReturnType<typeof setTimeout> | undefined;
+  private followTimer: ReturnType<typeof setTimeout> | undefined;
   /** Fingerprint of each recently delivered bundle, and its source map once one was built. */
   private readonly bundles = new Map<number, { fingerprint: string; map?: BundleSourceMap }>();
   private readonly snapshotWaiters = new Map<number, (s: PreviewSnapshot | undefined) => void>();
@@ -115,51 +155,113 @@ export class PreviewPanelManager implements vscode.Disposable {
     private readonly bundler: BundlerService,
     private readonly projects: ProjectRegistry,
     private readonly status: PreviewStatusBar,
+    /** Called after each successful build with the packages that were mocked. */
+    private readonly onMocked: (
+      projectRoot: string,
+      mocked: readonly MockedPackage[],
+    ) => void = () => undefined,
   ) {
+    const log = getLog();
     this.disposables.push(
       vscode.workspace.onDidSaveTextDocument((doc) => this.onDidSave(doc)),
+      vscode.workspace.onDidChangeTextDocument((e) => this.onDidChangeText(e)),
+      vscode.window.onDidChangeActiveTextEditor((editor) => this.onActiveEditor(editor)),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('rnLens.simulatedPlatform')) {
-          this.onPlatformSettingChanged().catch((err: unknown) =>
-            getLog().error('Switching the simulated platform failed', err),
+          this.setPlatform(settingPlatform()).catch((err: unknown) =>
+            log.error('Switching the simulated platform failed', err),
           );
+        }
+        if (e.affectsConfiguration('rnLens.networkAllowList') && this.panel) {
+          this.renderHtml(this.panel);
+        }
+        if (
+          e.affectsConfiguration('rnLens.entry') ||
+          e.affectsConfiguration('rnLens.extraAliases')
+        ) {
+          this.reload().catch(() => undefined);
+        }
+        if (e.affectsConfiguration('rnLens.updateMode')) {
+          // The unsaved-buffers plugin is part of the esbuild context.
+          this.reload().catch(() => undefined);
         }
       }),
     );
-  }
-
-  /** Rebuilds the open preview for the newly configured platform (resolves `.ios` / `.android`). */
-  private async onPlatformSettingChanged(): Promise<void> {
-    const current = this.current;
-    if (!current) return;
-    const platform = vscode.workspace
-      .getConfiguration('rnLens')
-      .get<SimulatedPlatform>('simulatedPlatform', 'ios');
-    if (platform === current.key.platform) return;
-    void this.bundler.release(current.key);
-    current.key = { ...current.key, platform };
-    await this.rebuild();
   }
 
   get isOpen(): boolean {
     return this.panel !== undefined;
   }
 
+  get isLocked(): boolean {
+    return this.locked;
+  }
+
+  /** Previews a component. */
   async show(request: PreviewRequest): Promise<void> {
+    const project = await this.projectOf(request.file);
+    const file = request.file.fsPath;
+    const { variantFile, variants } = await listAllVariants(file, request.exportName);
     this.ensurePanel();
-    await this.retarget(request);
+    await this.retarget(
+      {
+        kind: 'component',
+        file,
+        exportName: request.exportName,
+        variant: variantRef(request.variant, variants, variantFile, file),
+      },
+      project,
+      request.label,
+      variantFile,
+      variants,
+    );
+  }
+
+  /** Previews the whole app of the project containing `hint` (or the workspace's first project). */
+  async showApp(hint?: vscode.Uri): Promise<void> {
+    let projectRoot: string | undefined;
+    if (hint) {
+      projectRoot = (await this.projects.projectFor(hint))?.root;
+    }
+    projectRoot ??= this.current?.key.projectRoot ?? this.projects.getProjects()[0]?.root;
+    if (!projectRoot) {
+      throw new UserError(
+        "There's no React Native or Expo project in this workspace, so there's no app to preview. " +
+          'Open a folder whose package.json depends on react-native or expo.',
+      );
+    }
+    const entry = detectAppEntry(
+      projectRoot,
+      this.platform,
+      settings().get<string>('entry') || undefined,
+    );
+    if ('error' in entry) throw new UserError(entry.error);
+    getLog().info(`Previewing the app from ${entry.description}: ${entry.file}`);
+    this.ensurePanel();
+    await this.retarget(
+      { kind: 'app', file: entry.file, mode: entry.mode, routerAppDir: entry.routerAppDir },
+      projectRoot,
+      'App',
+      undefined,
+      [],
+    );
   }
 
   /** Re-attaches a panel restored by VS Code after a restart. */
   async restore(panel: vscode.WebviewPanel, target: PanelTarget): Promise<void> {
     this.panel?.dispose();
     this.setupPanel(panel);
-    await this.retarget({
-      file: vscode.Uri.file(target.file),
-      exportName: target.exportName,
-      label: target.label,
-      variant: target.variant,
-    });
+    if (target.platform) this.platform = target.platform;
+    if (target.kind === 'app') {
+      await this.showApp(vscode.Uri.file(target.file));
+    } else {
+      await this.show({
+        file: vscode.Uri.file(target.file),
+        exportName: target.exportName,
+        label: target.label,
+        variant: target.variant,
+      });
+    }
   }
 
   /** Disposes the current esbuild context and builds from scratch. */
@@ -177,6 +279,25 @@ export class PreviewPanelManager implements vscode.Disposable {
   /** Rebuilds the open preview (if any) after the bundler cache was cleared. */
   async rebuildIfOpen(): Promise<void> {
     if (this.current) await this.rebuild();
+  }
+
+  /** Switches the simulated platform of the open preview (rebuilds to resolve platform files). */
+  async setPlatform(platform: SimulatedPlatform): Promise<void> {
+    this.platform = platform;
+    const current = this.current;
+    if (!current || current.key.platform === platform) return;
+    void this.bundler.release(current.key);
+    current.key = { ...current.key, platform };
+    this.sendInit();
+    await this.rebuild();
+  }
+
+  /** Locks the preview to its current target, or unlocks it to follow the active editor. */
+  async toggleLock(): Promise<boolean> {
+    this.locked = !this.locked;
+    await vscode.commands.executeCommand('setContext', 'rnLens.previewLocked', this.locked);
+    this.sendInit();
+    return this.locked;
   }
 
   /** Test-only: rendered text, overlay and device state, or undefined if the webview isn't ready. */
@@ -206,9 +327,19 @@ export class PreviewPanelManager implements vscode.Disposable {
     return this.successfulBuildTimes;
   }
 
+  /** The file and export currently previewed (test hook). */
+  get currentTarget(): PreviewTarget | undefined {
+    return this.current?.key.target;
+  }
+
   /** Test-only: clicks the n-th clickable frame in the error overlay. */
   clickOverlayFrame(index: number): void {
     this.post({ type: '__test_click_frame', index });
+  }
+
+  /** Test-only: presses the preview element whose text is exactly `text`. */
+  press(text: string): void {
+    this.post({ type: '__test_press', text });
   }
 
   /** Test-only: switches device, color scheme or orientation in the toolbar. */
@@ -223,41 +354,34 @@ export class PreviewPanelManager implements vscode.Disposable {
     if (key) await this.bundler.release(key);
   }
 
-  private async retarget(request: PreviewRequest): Promise<void> {
-    const project = await this.projects.projectFor(request.file);
+  private async projectOf(file: vscode.Uri): Promise<string> {
+    const project = await this.projects.projectFor(file);
     if (!project) {
       throw new UserError(
-        `${path.basename(request.file.fsPath)} isn't inside a React Native or Expo project, so RN Lens can't preview it. ` +
+        `${path.basename(file.fsPath)} isn't inside a React Native or Expo project, so RN Lens can't preview it. ` +
           'Open a file from a project whose package.json depends on react-native or expo.',
       );
     }
-    const platform = vscode.workspace
-      .getConfiguration('rnLens')
-      .get<SimulatedPlatform>('simulatedPlatform', 'ios');
-    const file = request.file.fsPath;
-    const variantFile = findVariantFile(file);
-    const variants = variantFile ? await listVariants(variantFile) : [];
-    const variantName =
-      request.variant && variants.includes(request.variant) ? request.variant : null;
-    const key: BundleKey = {
-      projectRoot: project.root,
-      platform,
-      target: {
-        kind: 'component',
-        file,
-        exportName: request.exportName,
-        variant: variantFile && variantName ? { file: variantFile, name: variantName } : undefined,
-      },
-    };
+    return project.root;
+  }
+
+  private async retarget(
+    target: PreviewTarget,
+    projectRoot: string,
+    label: string,
+    variantFile: string | undefined,
+    variants: VariantInfo[],
+  ): Promise<void> {
+    const key: BundleKey = { projectRoot, platform: this.platform, target };
     if (this.current && bundleKeyId(this.current.key) !== bundleKeyId(key)) {
       void this.bundler.release(this.current.key);
     }
-    this.current = { key, label: request.label, variantFile, variants };
+    this.current = { key, label, variantFile, variants };
     void this.updateContextKeys();
 
     const panel = this.panel;
     if (!panel) return;
-    panel.title = `RN Lens: ${request.label}`;
+    panel.title = `RN Lens: ${label}`;
     panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Beside, true);
     this.sendInit();
     this.sendVariants();
@@ -282,9 +406,10 @@ export class PreviewPanelManager implements vscode.Disposable {
       this.successfulBuildTimes.push(result.buildMs);
       const summary = mockSummary(result.mocked);
       if (summary && summary !== this.lastMockSummary) {
-        log.info(`Native modules replaced with mocks because they can't run on web: ${summary}`);
+        log.info(`Replaced with mocks because they can't run on web: ${summary}`);
       }
       this.lastMockSummary = summary;
+      this.onMocked(current.key.projectRoot, result.mocked);
       this.bundles.set(id, { fingerprint: bundleFingerprint(result.code) });
       for (const old of [...this.bundles.keys()].filter((k) => k <= id - BUNDLES_KEPT)) {
         this.bundles.delete(old);
@@ -297,7 +422,7 @@ export class PreviewPanelManager implements vscode.Disposable {
         css: result.css,
         buildMs: result.buildMs,
         platform: current.key.platform,
-        mocked: result.mocked,
+        mocked: result.mocked.map(({ specifier, source, note }) => ({ specifier, source, note })),
       });
     } else {
       log.error(
@@ -316,12 +441,22 @@ export class PreviewPanelManager implements vscode.Disposable {
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       { enableScripts: true, retainContextWhenHidden: true },
     );
+    this.platform = settingPlatform();
     this.setupPanel(panel);
     return panel;
   }
 
   private setupPanel(panel: vscode.WebviewPanel): void {
     this.panel = panel;
+    this.panelDisposables.push(
+      panel.onDidDispose(() => this.onPanelDisposed(panel)),
+      panel.webview.onDidReceiveMessage((m: unknown) => this.onMessage(m)),
+    );
+    this.renderHtml(panel);
+  }
+
+  /** (Re)writes the webview document; the webview reloads and asks for the latest state. */
+  private renderHtml(panel: vscode.WebviewPanel): void {
     this.webviewReady = false;
     const webview = panel.webview;
     webview.options = {
@@ -333,10 +468,7 @@ export class PreviewPanelManager implements vscode.Disposable {
         ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
       ],
     };
-
-    const allow = sanitizeAllowList(
-      vscode.workspace.getConfiguration('rnLens').get<unknown[]>('networkAllowList', []),
-    );
+    const allow = sanitizeAllowList(settings().get<unknown[]>('networkAllowList', []));
     if (allow.rejected.length > 0) {
       getLog().warn(
         `Ignored rnLens.networkAllowList entries that aren't origins like "http://localhost:4000": ${allow.rejected.join(', ')}`,
@@ -353,21 +485,20 @@ export class PreviewPanelManager implements vscode.Disposable {
         .toString(),
       connectSrc: allow.origins,
     });
-
-    this.panelDisposables.push(
-      panel.onDidDispose(() => this.onPanelDisposed(panel)),
-      webview.onDidReceiveMessage((m: unknown) => this.onMessage(m)),
-    );
   }
 
   private onPanelDisposed(panel: vscode.WebviewPanel): void {
     if (this.panel !== panel) return;
     if (this.current) void this.bundler.release(this.current.key);
     for (const d of this.panelDisposables.splice(0)) d.dispose();
+    clearTimeout(this.typeTimer);
+    clearTimeout(this.followTimer);
     this.panel = undefined;
     this.current = undefined;
     this.latest = undefined;
     this.webviewReady = false;
+    this.locked = false;
+    void vscode.commands.executeCommand('setContext', 'rnLens.previewLocked', false);
     this.bundles.clear();
     this.successfulBuildTimes = [];
     this.status.set({ kind: 'hidden' });
@@ -406,6 +537,14 @@ export class PreviewPanelManager implements vscode.Disposable {
         this.selectVariant(m.name).catch((err: unknown) =>
           log.error('Switching variant failed', err),
         );
+        break;
+      case 'setPlatform':
+        this.setPlatform(m.platform).catch((err: unknown) =>
+          log.error('Switching the simulated platform failed', err),
+        );
+        break;
+      case 'toggleLock':
+        this.toggleLock().catch((err: unknown) => log.error('Toggling the lock failed', err));
         break;
       case 'reload':
         this.reload().catch((err: unknown) => log.error('Reload failed', err));
@@ -487,11 +626,12 @@ export class PreviewPanelManager implements vscode.Disposable {
   private async openSource(file: string, line: number, column: number): Promise<void> {
     if (!path.isAbsolute(file) || !existsSync(file)) return;
     const position = new vscode.Position(Math.max(0, line - 1), Math.max(0, column - 1));
-    // Open next to the preview, never on top of it.
+    // Open next to the preview, never on top of it, and don't retarget the preview to it.
     const editorColumn =
       this.panel?.viewColumn === vscode.ViewColumn.One
         ? vscode.ViewColumn.Two
         : vscode.ViewColumn.One;
+    this.ignoreFollowFor = file;
     await vscode.window.showTextDocument(vscode.Uri.file(file), {
       viewColumn: editorColumn,
       selection: new vscode.Range(position, position),
@@ -501,24 +641,33 @@ export class PreviewPanelManager implements vscode.Disposable {
 
   private async selectVariant(name: string | null): Promise<void> {
     const current = this.current;
-    if (!current) return;
-    const variant =
-      name && current.variantFile && current.variants.includes(name)
-        ? { file: current.variantFile, name }
-        : undefined;
-    current.key = { ...current.key, target: { ...current.key.target, variant } };
+    if (!current || current.key.target.kind !== 'component') return;
+    const target = current.key.target;
+    const variant = variantRef(name, current.variants, current.variantFile, target.file);
+    current.key = { ...current.key, target: { ...target, variant } };
     this.sendInit();
     await this.rebuild();
+  }
+
+  private isProjectSource(file: string): boolean {
+    const current = this.current;
+    return !!current && isWithin(current.key.projectRoot, file, path) && !isInNodeModules(file);
   }
 
   private onDidSave(doc: vscode.TextDocument): void {
     const current = this.current;
     if (!current || doc.uri.scheme !== 'file') return;
     const file = doc.uri.fsPath;
+    if (!this.isProjectSource(file)) return;
     const root = current.key.projectRoot;
-    if (!isWithin(root, file, path) || isInNodeModules(file)) return;
     const work = async (): Promise<void> => {
-      if (current.variantFile === file || findVariantFile(current.key.target.file) === file) {
+      const target = current.key.target;
+      if (
+        target.kind === 'component' &&
+        (current.variantFile === file ||
+          findVariantFile(target.file) === file ||
+          target.file === file)
+      ) {
         await this.refreshVariants();
       }
       if (needsReload(root, file)) await this.reload();
@@ -528,15 +677,58 @@ export class PreviewPanelManager implements vscode.Disposable {
     work().catch((err: unknown) => getLog().error('Rebuild after save failed', err));
   }
 
+  /** `onType` mode: rebuild (with unsaved contents) shortly after edits stop. */
+  private onDidChangeText(e: vscode.TextDocumentChangeEvent): void {
+    if (e.contentChanges.length === 0 || e.document.uri.scheme !== 'file') return;
+    if (settings().get<string>('updateMode', 'onSave') !== 'onType') return;
+    if (!this.isProjectSource(e.document.uri.fsPath)) return;
+    clearTimeout(this.typeTimer);
+    this.typeTimer = setTimeout(() => {
+      this.rebuild().catch((err: unknown) => getLog().error('Rebuild while typing failed', err));
+    }, TYPE_DEBOUNCE_MS);
+  }
+
+  /** Unless locked, a component preview follows the active editor to other component files. */
+  private onActiveEditor(editor: vscode.TextEditor | undefined): void {
+    const current = this.current;
+    if (!editor || !this.panel || !current || this.locked) return;
+    if (current.key.target.kind !== 'component') return;
+    const doc = editor.document;
+    const file = doc.uri.fsPath;
+    if (doc.uri.scheme !== 'file' || !PREVIEWABLE_LANGUAGES.has(doc.languageId)) return;
+    if (this.ignoreFollowFor === file) {
+      this.ignoreFollowFor = undefined;
+      return;
+    }
+    if (file === current.key.target.file || isInNodeModules(file)) return;
+    // RN Lens's own files (mocks, decorators) aren't something to preview.
+    if (file.split(/[\\/]/).includes('.rnlens')) return;
+    clearTimeout(this.followTimer);
+    this.followTimer = setTimeout(() => {
+      const component = pickDefaultComponent(detectComponents(doc.getText()));
+      if (!component || this.locked || this.current !== current) return;
+      const label =
+        component.exportName === 'default'
+          ? (component.localName ?? path.basename(file, path.extname(file)))
+          : component.exportName;
+      this.show({ file: doc.uri, exportName: component.exportName, label }).catch((err: unknown) =>
+        getLog().debug(`Not following to ${file}`, err),
+      );
+    }, FOLLOW_DEBOUNCE_MS);
+  }
+
   private async refreshVariants(): Promise<void> {
     const current = this.current;
-    if (!current) return;
-    current.variantFile = findVariantFile(current.key.target.file);
-    current.variants = current.variantFile ? await listVariants(current.variantFile) : [];
-    const selected = current.key.target.variant?.name;
-    if (selected && !current.variants.includes(selected)) {
-      current.key = { ...current.key, target: { ...current.key.target, variant: undefined } };
-    }
+    if (!current || current.key.target.kind !== 'component') return;
+    const target = current.key.target;
+    const { variantFile, variants } = await listAllVariants(target.file, target.exportName);
+    current.variantFile = variantFile;
+    current.variants = variants;
+    const selected = target.variant?.name;
+    current.key = {
+      ...current.key,
+      target: { ...target, variant: variantRef(selected, variants, variantFile, target.file) },
+    };
     this.sendVariants();
   }
 
@@ -563,27 +755,30 @@ export class PreviewPanelManager implements vscode.Disposable {
     this.post({
       type: 'init',
       target: {
+        kind: t.kind,
         file: t.file,
-        exportName: t.exportName,
+        exportName: t.kind === 'component' ? t.exportName : '',
         label: current.label,
-        variant: t.variant?.name ?? null,
+        variant: t.kind === 'component' ? (t.variant?.name ?? null) : null,
+        platform: current.key.platform,
       },
-      defaultDevice: vscode.workspace
-        .getConfiguration('rnLens')
-        .get<string>('defaultDevice', 'iphone-15'),
+      defaultDevice: settings().get<string>('defaultDevice', 'iphone-15'),
       assetBase: panel.webview
         .asWebviewUri(vscode.Uri.file(assetCacheDir(this.cacheDir)))
         .toString(),
+      platform: current.key.platform,
+      locked: this.locked,
     });
   }
 
   private sendVariants(): void {
     const current = this.current;
     if (!current) return;
+    const t = current.key.target;
     this.post({
       type: 'variants',
-      names: current.variants,
-      selected: current.key.target.variant?.name ?? null,
+      names: current.variants.map((v) => v.name),
+      selected: t.kind === 'component' ? (t.variant?.name ?? null) : null,
     });
   }
 
@@ -599,6 +794,8 @@ export class PreviewPanelManager implements vscode.Disposable {
   }
 
   dispose(): void {
+    clearTimeout(this.typeTimer);
+    clearTimeout(this.followTimer);
     this.panel?.dispose();
     for (const d of this.disposables) d.dispose();
   }

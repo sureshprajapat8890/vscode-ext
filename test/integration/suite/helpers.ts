@@ -49,7 +49,13 @@ export async function waitForSnapshot(
       last = await testing(api).snapshot();
       return last && predicate(last) ? last : undefined;
     },
-    () => `preview did not reach the expected state; last snapshot: ${JSON.stringify(last)}`,
+    () =>
+      `preview did not reach the expected state; last snapshot: ${JSON.stringify(last)}\n` +
+      `RN Lens log tail:\n${testing(api)
+        .recentLog()
+        .filter((l) => !l.includes('Snapshot unavailable'))
+        .slice(-25)
+        .join('\n')}`,
     timeoutMs,
   );
 }

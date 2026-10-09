@@ -3,6 +3,7 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import type * as esbuildApi from 'esbuild';
 import type { BuildContext, BuildOptions, Message } from 'esbuild';
+import { EMPTY_PROJECT_CONFIG, type ProjectConfig } from '../project/config';
 import { createBuildOptions, type ExtensionPaths } from './buildOptions';
 import { createFlowStripMemory, type StripFlow } from './plugins/flowStrip';
 import { mockRegistryPlugin, type MockUse } from './plugins/mockRegistry';
@@ -17,6 +18,7 @@ import {
 } from './types';
 
 type Esbuild = Pick<typeof esbuildApi, 'context'>;
+type Context = BuildContext<BuildOptions & { write: false }>;
 
 export interface BundlerServiceOptions extends ExtensionPaths {
   /** Loads esbuild lazily on first build; injectable for tests. */
@@ -24,19 +26,29 @@ export interface BundlerServiceOptions extends ExtensionPaths {
   /** Loads the Flow type stripper lazily, the first time a Flow file is seen. */
   loadStripper?: () => Promise<StripFlow>;
   resolveDeps?: (projectRoot: string, vendorDir: string) => Promise<RuntimeDeps>;
+  /** Project configuration (aliases, rnlens.config.js, …); none when omitted. */
+  resolveProjectConfig?: (projectRoot: string) => Promise<ProjectConfig>;
+  /** Contents of open, unsaved documents (`onType` mode); undefined to read from disk. */
+  readUnsaved?: (file: string) => string | undefined;
   onDepsWarning?: (message: string) => void;
+  onProjectNote?: (message: string) => void;
 }
 
 interface Entry {
-  context: Promise<BuildContext<BuildOptions & { write: false }>>;
+  context: Promise<Context>;
   /** Latest target requested for this context (variants may change between builds). */
   current: { target: PreviewTarget };
   mocksUsed: () => MockUse[];
+  /** Bare imports that failed to resolve in an earlier build; auto-mocked from then on. */
+  unresolved: Set<string>;
   /** Second context emitting source maps, created on the first runtime error that needs one. */
-  mapContext: Promise<BuildContext<BuildOptions & { write: false }>> | undefined;
+  mapContext: Promise<Context> | undefined;
   running: Promise<BundleResult> | undefined;
   queued: Promise<BundleResult> | undefined;
 }
+
+/** How many times a build may be retried after auto-mocking newly found missing packages. */
+const MAX_MISSING_PACKAGE_RETRIES = 3;
 
 function toBuildMessage(m: Message, root: string): BuildMessage {
   const loc = m.location;
@@ -52,6 +64,23 @@ function toBuildMessage(m: Message, root: string): BuildMessage {
 
 function isEsbuildFailure(err: unknown): err is { errors: Message[]; warnings: Message[] } {
   return !!err && typeof err === 'object' && Array.isArray((err as { errors?: unknown }).errors);
+}
+
+/**
+ * Bare package specifiers from esbuild "Could not resolve" errors, or undefined if any error is
+ * something else (a syntax error, a missing relative file) that mocking can't fix.
+ */
+export function missingPackages(errors: readonly Message[]): string[] | undefined {
+  const names: string[] = [];
+  for (const e of errors) {
+    const m = /^Could not resolve "([^"]+)"/.exec(e.text);
+    const spec = m?.[1];
+    if (!spec || spec.startsWith('.') || path.isAbsolute(spec) || spec.startsWith('rnlens:')) {
+      return undefined;
+    }
+    if (!names.includes(spec)) names.push(spec);
+  }
+  return names.length > 0 ? names : undefined;
 }
 
 /**
@@ -76,6 +105,7 @@ export const defaultLoadStripper = async (): Promise<StripFlow> => {
 export class BundlerService {
   private readonly entries = new Map<string, Entry>();
   private readonly deps = new Map<string, Promise<RuntimeDeps>>();
+  private readonly configs = new Map<string, Promise<ProjectConfig>>();
   private flowMemory = createFlowStripMemory();
   private esbuild: Promise<Esbuild> | undefined;
 
@@ -90,25 +120,18 @@ export class BundlerService {
     const id = bundleKeyId(key);
     let entry = this.entries.get(id);
     if (!entry) {
-      const mocks = mockRegistryPlugin({
-        projectRoot: key.projectRoot,
-        mocksDir: this.options.mocksDir,
-        runtimeDir: this.options.runtimeDir,
-      });
-      const current = { target: key.target };
       const created: Entry = {
-        current,
-        context: this.createContext(key, () => current.target, mocks.plugin, false),
-        mocksUsed: mocks.used,
+        current: { target: key.target },
+        context: Promise.reject(new Error('not started')),
+        mocksUsed: () => [],
+        unresolved: new Set(),
         mapContext: undefined,
         running: undefined,
         queued: undefined,
       };
-      // A context that failed to start is dropped so the next build retries from scratch.
-      created.context.catch(() => {
-        if (this.entries.get(id) === created) this.entries.delete(id);
-      });
+      created.context.catch(() => undefined);
       this.entries.set(id, created);
+      this.startContext(created, key, id);
       entry = created;
     }
     entry.current.target = key.target;
@@ -123,15 +146,8 @@ export class BundlerService {
   async sourceMapFor(key: BundleKey): Promise<{ map: string; fingerprint: string } | undefined> {
     const entry = this.entries.get(bundleKeyId(key));
     if (!entry) return undefined;
-    if (!entry.mapContext) {
-      const mocks = mockRegistryPlugin({
-        projectRoot: key.projectRoot,
-        mocksDir: this.options.mocksDir,
-        runtimeDir: this.options.runtimeDir,
-      });
-      entry.mapContext = this.createContext(key, () => entry.current.target, mocks.plugin, true);
-    }
-    let context: BuildContext<BuildOptions & { write: false }>;
+    entry.mapContext ??= this.createContext(entry, key, true);
+    let context: Context;
     try {
       context = await entry.mapContext;
     } catch {
@@ -161,9 +177,10 @@ export class BundlerService {
     await this.disposeEntry(entry);
   }
 
-  /** Forgets cached dependency resolution for a project (e.g. after package.json changes). */
+  /** Forgets cached dependency resolution and configuration for a project. */
   invalidateProject(projectRoot: string): void {
     this.deps.delete(projectRoot);
+    this.configs.delete(projectRoot);
   }
 
   /** Disposes every context and deletes the on-disk cache (Flow-stripped files, large assets). */
@@ -177,7 +194,16 @@ export class BundlerService {
     const entries = [...this.entries.values()];
     this.entries.clear();
     this.deps.clear();
+    this.configs.clear();
     await Promise.all(entries.map((e) => this.disposeEntry(e)));
+  }
+
+  /** (Re)creates an entry's main context; a context that fails to start drops the entry. */
+  private startContext(entry: Entry, key: BundleKey, id: string): void {
+    entry.context = this.createContext(entry, key, false);
+    entry.context.catch(() => {
+      if (this.entries.get(id) === entry) this.entries.delete(id);
+    });
   }
 
   private schedule(entry: Entry, key: BundleKey): Promise<BundleResult> {
@@ -207,61 +233,88 @@ export class BundlerService {
   private async runOnce(entry: Entry, key: BundleKey): Promise<BundleResult> {
     const started = performance.now();
     const elapsed = (): number => Math.round(performance.now() - started);
-    try {
-      const ctx = await entry.context;
-      const result = await ctx.rebuild();
-      const success: BundleSuccess = {
-        ok: true,
-        code: '',
-        css: '',
-        buildMs: 0,
-        warnings: result.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
-        mocked: entry
-          .mocksUsed()
-          .map(({ specifier, source, note }) => ({ specifier, source, note })),
-      };
-      for (const file of result.outputFiles) {
-        if (file.path.endsWith('.js')) success.code = file.text;
-        else if (file.path.endsWith('.css')) success.css = file.text;
-      }
-      success.buildMs = elapsed();
-      return success;
-    } catch (err) {
-      if (isEsbuildFailure(err)) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const ctx = await entry.context;
+        const result = await ctx.rebuild();
+        const success: BundleSuccess = {
+          ok: true,
+          code: '',
+          css: '',
+          buildMs: 0,
+          warnings: result.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
+          mocked: entry.mocksUsed().map(({ specifier, source, note, importers }) => ({
+            specifier,
+            source,
+            note,
+            importers,
+          })),
+        };
+        for (const file of result.outputFiles) {
+          if (file.path.endsWith('.js')) success.code = file.text;
+          else if (file.path.endsWith('.css')) success.css = file.text;
+        }
+        success.buildMs = elapsed();
+        return success;
+      } catch (err) {
+        if (isEsbuildFailure(err)) {
+          // Packages that aren't installed (often optional native dependencies) become
+          // auto-mocks: rebuild with them mocked rather than failing the preview.
+          const missing = missingPackages(err.errors)?.filter((s) => !entry.unresolved.has(s));
+          if (missing && missing.length > 0 && attempt < MAX_MISSING_PACKAGE_RETRIES) {
+            for (const s of missing) entry.unresolved.add(s);
+            const old = entry;
+            const previous = old.context;
+            const previousMap = old.mapContext;
+            old.mapContext = undefined;
+            this.startContext(old, key, bundleKeyId(key));
+            void this.disposeContexts([previous, previousMap]);
+            continue;
+          }
+          return {
+            ok: false,
+            errors: err.errors.map((e) => toBuildMessage(e, key.projectRoot)),
+            warnings: err.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
+            buildMs: elapsed(),
+          };
+        }
         return {
           ok: false,
-          errors: err.errors.map((e) => toBuildMessage(e, key.projectRoot)),
-          warnings: err.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
+          errors: [{ text: err instanceof Error ? err.message : String(err) }],
+          warnings: [],
           buildMs: elapsed(),
         };
       }
-      return {
-        ok: false,
-        errors: [{ text: err instanceof Error ? err.message : String(err) }],
-        warnings: [],
-        buildMs: elapsed(),
-      };
     }
   }
 
-  private async createContext(
-    key: BundleKey,
-    getTarget: () => PreviewTarget,
-    mockPlugin: esbuildApi.Plugin,
-    sourcemap: boolean,
-  ) {
-    const [esbuild, deps] = await Promise.all([this.loadEsbuild(), this.depsFor(key.projectRoot)]);
+  private async createContext(entry: Entry, key: BundleKey, sourcemap: boolean): Promise<Context> {
+    const [esbuild, deps, config] = await Promise.all([
+      this.loadEsbuild(),
+      this.depsFor(key.projectRoot),
+      this.configFor(key.projectRoot),
+    ]);
     const { vendorDir, runtimeDir, mocksDir, cacheDir } = this.options;
+    const mocks = mockRegistryPlugin({
+      projectRoot: key.projectRoot,
+      mocksDir,
+      runtimeDir,
+      configMocks: config.mocks,
+      unresolved: entry.unresolved,
+    });
+    if (!sourcemap) entry.mocksUsed = mocks.used;
     return esbuild.context(
       createBuildOptions({
         key,
         deps,
         paths: { vendorDir, runtimeDir, mocksDir, cacheDir },
-        getTarget,
-        mockPlugin,
+        config,
+        getTarget: () => entry.current.target,
+        mockPlugin: mocks.plugin,
         sourcemap,
         flowMemory: this.flowMemory,
         loadStripper: this.options.loadStripper ?? defaultLoadStripper,
+        readUnsaved: this.options.readUnsaved,
       }),
     );
   }
@@ -285,9 +338,23 @@ export class BundlerService {
     return deps;
   }
 
-  private async disposeEntry(entry: Entry): Promise<void> {
+  private configFor(projectRoot: string): Promise<ProjectConfig> {
+    let config = this.configs.get(projectRoot);
+    if (!config) {
+      const load = this.options.resolveProjectConfig;
+      config = (load ? load(projectRoot) : Promise.resolve(EMPTY_PROJECT_CONFIG)).then((c) => {
+        for (const note of c.notes) this.options.onProjectNote?.(note);
+        return c;
+      });
+      config.catch(() => this.configs.delete(projectRoot));
+      this.configs.set(projectRoot, config);
+    }
+    return config;
+  }
+
+  private async disposeContexts(contexts: (Promise<Context> | undefined)[]): Promise<void> {
     await Promise.all(
-      [entry.context, entry.mapContext].map(async (context) => {
+      contexts.map(async (context) => {
         try {
           await (await context)?.dispose();
         } catch {
@@ -295,5 +362,9 @@ export class BundlerService {
         }
       }),
     );
+  }
+
+  private disposeEntry(entry: Entry): Promise<void> {
+    return this.disposeContexts([entry.context, entry.mapContext]);
   }
 }

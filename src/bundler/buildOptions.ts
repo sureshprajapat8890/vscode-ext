@@ -2,8 +2,12 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { BuildOptions, Plugin } from 'esbuild';
 import { WEB_CAPABLE_PACKAGES } from '../mocks';
+import { EMPTY_PROJECT_CONFIG, type ProjectConfig } from '../project/config';
+import { aliasesPlugin } from './plugins/aliases';
 import { assetsPlugin } from './plugins/assets';
+import { expoRouterDefines, expoRouterPlugin } from './plugins/expoRouter';
 import { flowStripPlugin, type FlowStripMemory, type StripFlow } from './plugins/flowStrip';
+import { metroDevClientsPlugin } from './plugins/metroDevClients';
 import {
   findPlatformSpecificNames,
   platformExtensionsPlugin,
@@ -11,6 +15,7 @@ import {
 } from './plugins/platformExtensions';
 import { rnAliasPlugin } from './plugins/rnAlias';
 import { singleReactPlugin } from './plugins/singleReact';
+import { unsavedBuffersPlugin } from './plugins/unsavedBuffers';
 import { webCapablePlugin } from './plugins/webCapable';
 import { projectDefines } from './projectEnv';
 import type { RuntimeDeps } from './runtimeDeps';
@@ -35,6 +40,8 @@ export interface BuildInput {
   key: BundleKey;
   deps: RuntimeDeps;
   paths: ExtensionPaths;
+  /** Aliases, defines, decorators and plugins from settings / Babel / rnlens.config.js. */
+  config?: ProjectConfig;
   /** Current target; read on every build so variant switches don't need a new context. */
   getTarget: () => PreviewTarget;
   mockPlugin: Plugin;
@@ -42,6 +49,8 @@ export interface BuildInput {
   sourcemap: boolean;
   flowMemory: FlowStripMemory;
   loadStripper: () => Promise<StripFlow>;
+  /** Unsaved editor contents for project files (onType mode). */
+  readUnsaved?: (file: string) => string | undefined;
 }
 
 export const assetCacheDir = (cacheDir: string): string => path.join(cacheDir, 'assets');
@@ -51,6 +60,8 @@ export const flowCacheDir = (cacheDir: string): string => path.join(cacheDir, 'f
 export function createBuildOptions(input: BuildInput): BuildOptions & { write: false } {
   const { key, deps, paths } = input;
   const { projectRoot, platform } = key;
+  const config = input.config ?? EMPTY_PROJECT_CONFIG;
+  const routerAppDir = key.target.kind === 'app' ? key.target.routerAppDir : undefined;
   return {
     entryPoints: [ENTRY_SPECIFIER],
     // Never written (write: false); only names the in-memory outputs.
@@ -68,9 +79,10 @@ export function createBuildOptions(input: BuildInput): BuildOptions & { write: f
     resolveExtensions: WEB_RESOLVE_EXTENSIONS,
     mainFields: ['react-native', 'browser', 'module', 'main'],
     conditions: ['react-native', 'browser', 'import', 'default'],
-    // Fallback lookups after the normal node_modules walk: packages the `expo` package nests
-    // (Expo's resolver exposes them to apps), then RN Lens's vendored copies.
+    // Fallback lookups after the normal node_modules walk: Babel module-resolver roots, packages
+    // the `expo` package nests (Expo's resolver exposes them to apps), then RN Lens's vendored copies.
     nodePaths: [
+      ...config.aliasRoots,
       ...[path.join(projectRoot, 'node_modules', 'expo', 'node_modules')].filter((d) =>
         existsSync(d),
       ),
@@ -79,19 +91,29 @@ export function createBuildOptions(input: BuildInput): BuildOptions & { write: f
     define: {
       __DEV__: 'true',
       'process.env.NODE_ENV': '"development"',
-      'process.env.EXPO_OS': JSON.stringify(platform),
+      // Expo packages switch between native and web implementations on EXPO_OS, and the preview
+      // runs on web. (Project code sees the simulated platform through Platform.OS.)
+      'process.env.EXPO_OS': '"web"',
       global: 'globalThis',
       ...projectDefines(projectRoot),
+      ...(routerAppDir ? expoRouterDefines(projectRoot, routerAppDir) : {}),
+      ...config.define,
     },
     banner: { js: PROCESS_SHIM },
     logLevel: 'silent',
     plugins: [
-      virtualEntryPlugin(input.getTarget, projectRoot, paths.runtimeDir),
+      // The project's own esbuild plugins (rnlens.config.js) get the first say.
+      ...config.plugins,
+      virtualEntryPlugin(input.getTarget, projectRoot, paths.runtimeDir, config.decorators),
       input.mockPlugin,
-      singleReactPlugin(deps.reactResolveDir),
+      aliasesPlugin(config.aliases, projectRoot, platform),
+      singleReactPlugin(deps.reactResolveDir, paths.runtimeDir),
       rnAliasPlugin(deps.rnwResolveDir, paths.runtimeDir),
       platformExtensionsPlugin(platform, findPlatformSpecificNames(projectRoot)),
       webCapablePlugin(WEB_CAPABLE_PACKAGES),
+      metroDevClientsPlugin(),
+      ...(routerAppDir ? [expoRouterPlugin(routerAppDir)] : []),
+      ...(input.readUnsaved ? [unsavedBuffersPlugin(projectRoot, input.readUnsaved)] : []),
       assetsPlugin({ cacheDir: assetCacheDir(paths.cacheDir) }),
       flowStripPlugin({
         cacheDir: flowCacheDir(paths.cacheDir),

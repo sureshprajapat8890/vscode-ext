@@ -4,6 +4,29 @@ All notable changes to RN Lens are documented here. This project follows [Semant
 
 ## [Unreleased]
 
+### Phase 3 — Beta
+
+- **RN Lens: Preview App**: runs the whole app. The entry comes from `rnLens.entry`, expo-router, package.json `main`, `index.*` (platform-specific first) or `App.*`. It works with `AppRegistry`, Expo's `registerRootComponent` and **expo-router**; for expo-router, RN Lens generates the route context Metro would build with `require.context`. React Navigation apps are navigable in the preview.
+- **Simulated platform toggle** in the toolbar (iOS / Android / Web), per preview; it rebuilds so your own `.ios` / `.android` files resolve. Libraries see the real `web` platform (React Navigation follows the simulated one).
+- **Follow the active editor**: component previews retarget to the component file you switch to, and **Toggle Lock** (🔒 in the toolbar and title bar) pins the current one.
+- **`rnLens.updateMode: "onType"`** rebuilds from unsaved editor contents 300 ms after you stop typing.
+- **Aliases**:
+  - `babel-plugin-module-resolver` aliases and roots, parsed statically and never executed.
+  - `rnLens.extraAliases`.
+  - `aliases` in `rnlens.config.js`.
+
+  Aliased imports into your own code get platform-specific files.
+- **`rnlens.config.js`** (`.cjs` / `.mjs`), loaded only in trusted workspaces: `decorators`, `define`, `mocks`, `aliases`, `esbuildPlugins`.
+- **Auto-mocks**:
+  - Packages that aren't installed become no-op mocks instead of failing the build.
+  - `TurboModuleRegistry` and `requireNativeComponent` are mocked.
+  - The 26 React Native APIs react-native-web lacks (`PlatformColor`, `PermissionsAndroid`, `ToastAndroid`, `useAnimatedValue`, …) are shimmed.
+- **Create mock for …** quick fix on the warning RN Lens puts on imports of auto-mocked packages. It writes a typed stub for the names you import.
+- **Inline variants** from `export const previews = { … }` in the component file (flat, or keyed by export name).
+- **Fonts**: `expo-font`'s `useFonts` / `loadAsync` with `require('./x.ttf')`.
+- Changing `rnLens.networkAllowList` updates the preview's Content Security Policy straight away.
+- Expo's Metro dev-server clients and LogBox are disabled in previews.
+
 ### Phase 2 — MVP
 
 - **▶ Preview CodeLens** above every exported component.

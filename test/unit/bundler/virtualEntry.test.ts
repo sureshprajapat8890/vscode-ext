@@ -21,7 +21,11 @@ describe('generateEntry', () => {
     );
     expect(src).toContain(`AppRegistry.registerComponent("${APP_KEY}"`);
     expect(src).toContain('globalThis.__RNLENS_ROOT__');
-    expect(src).toContain('globalThis.__RNLENS_UNMOUNT__ = () => root.unmount();');
+    expect(src).toContain(
+      `AppRegistry.runApplication("${APP_KEY}", { rootTag: globalThis.__RNLENS_ROOT__ });`,
+    );
+    // Unmounting is the runtime's job (it tracks every React root the bundle creates).
+    expect(src).not.toContain('__RNLENS_UNMOUNT__');
     expect(src).not.toContain('Variants');
   });
 
@@ -40,6 +44,38 @@ describe('generateEntry', () => {
     expect(src).toContain(`import Decorators from "/p/.rnlens/decorators.tsx";`);
     expect(src).toContain(`const Decorate = Decorators;`);
     expect(src).toContain('must default-export a component');
+  });
+
+  it('renders props variants from the component file previews object', () => {
+    const src = generateEntry({
+      kind: 'component',
+      file: '/p/Card.tsx',
+      exportName: 'Card',
+      variant: { kind: 'props', file: '/p/Card.tsx', name: 'Primary' },
+    });
+    expect(src).not.toContain('import * as Variants');
+    expect(src).toContain('const previews = Target.previews || {};');
+    expect(src).toContain('const forExport = previews["Card"];');
+    expect(src).toContain('const Shown = () => createElement(Component, variantProps);');
+    expect(() => new Function(src.replace(/^import .*$/gm, ''))).not.toThrow();
+  });
+
+  it('runs app entries, falling back to the last registered app when nothing rendered', () => {
+    const src = generateEntry({ kind: 'app', file: '/p/index.ts', mode: 'module' });
+    expect(src).toContain(`import { ErrorBoundary, mountedRootCount } from 'rnlens:runtime';`);
+    expect(src).toContain(`import "/p/index.ts";`);
+    expect(src).toContain('AppRegistry.setWrapperComponentProvider(() => ErrorBoundary);');
+    expect(src).toContain('if (mountedRootCount() === 0) {');
+    expect(src).toContain('AppRegistry.runApplication(keys[keys.length - 1]');
+    expect(src).not.toContain('Decorators');
+    expect(() => new Function(src.replace(/^import .*$/gm, ''))).not.toThrow();
+  });
+
+  it('registers a root component for component-mode apps', () => {
+    const src = generateEntry({ kind: 'app', file: '/p/App.tsx', mode: 'component' });
+    expect(src).toContain(`import * as Root from "/p/App.tsx";`);
+    expect(src).toContain(`AppRegistry.registerComponent('main', () => Root.default);`);
+    expect(() => new Function(src.replace(/^import .*$/gm, ''))).not.toThrow();
   });
 
   it('cannot be broken out of by quotes in names', () => {

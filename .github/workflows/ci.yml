@@ -23,11 +23,13 @@ jobs:
             package-lock.json
             test/fixtures/expo-app/package-lock.json
             test/fixtures/bare-rn-app/package-lock.json
+            test/fixtures/router-app/package-lock.json
       - run: npm ci
       - name: Install fixture dependencies
         run: |
           npm ci --prefix test/fixtures/expo-app
           npm ci --prefix test/fixtures/bare-rn-app
+          npm ci --prefix test/fixtures/router-app
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:coverage

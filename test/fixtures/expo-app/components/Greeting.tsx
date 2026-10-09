@@ -12,3 +12,7 @@ export function Greeting({ name = 'world' }: { name?: string }) {
     </View>
   );
 }
+
+export const previews = {
+  Named: { name: 'Grace' },
+};

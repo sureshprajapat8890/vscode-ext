@@ -45,6 +45,17 @@ export const BUILT_IN_MOCKS: readonly BuiltInMock[] = [
   },
   { name: 'expo-splash-screen', file: 'expo-splash-screen.ts', note: 'no-op' },
   { name: 'react-native-config', file: 'react-native-config.ts', note: 'values from .env' },
+  {
+    name: '@expo/log-box/lib',
+    file: '@expo/log-box-lib.ts',
+    note: "RN Lens's overlay shows errors instead of Expo's LogBox",
+  },
+  {
+    name: '@expo/metro-runtime',
+    file: '@expo/metro-runtime.ts',
+    subpaths: true,
+    note: "Metro's HMR client isn't used by RN Lens",
+  },
 ];
 
 /**

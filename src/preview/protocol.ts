@@ -30,10 +30,16 @@ export interface ProtocolMock {
 
 /** What the panel previews; persisted in webview state so panels survive a restart. */
 export interface PanelTarget {
+  /** `component` (default for state saved by older versions) or the whole `app`. */
+  kind?: 'component' | 'app';
+  /** Component file, or the app entry file. */
   file: string;
+  /** Component export (empty for apps). */
   exportName: string;
   label: string;
   variant: string | null;
+  /** Simulated platform chosen in the toolbar. */
+  platform?: SimulatedOS;
 }
 
 export type SimulatedOS = 'ios' | 'android' | 'web';
@@ -41,7 +47,14 @@ export type ConsoleLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 
 /** Extension → webview. */
 export type HostMessage =
-  | { type: 'init'; target: PanelTarget; defaultDevice: string; assetBase: string }
+  | {
+      type: 'init';
+      target: PanelTarget;
+      defaultDevice: string;
+      assetBase: string;
+      platform: SimulatedOS;
+      locked: boolean;
+    }
   | {
       type: 'bundle';
       id: number;
@@ -63,6 +76,7 @@ export type HostMessage =
     }
   | { type: '__test_snapshot'; requestId: number }
   | { type: '__test_click_frame'; index: number }
+  | { type: '__test_press'; text: string }
   | { type: '__test_set_env'; deviceId?: string; scheme?: 'light' | 'dark'; landscape?: boolean };
 
 export interface OverlaySnapshot {
@@ -89,6 +103,8 @@ export type WebviewMessage =
   | { type: 'selectVariant'; name: string | null }
   | { type: 'reload' }
   | { type: 'showOutput' }
+  | { type: 'setPlatform'; platform: SimulatedOS }
+  | { type: 'toggleLock' }
   | {
       type: '__test_snapshot_result';
       requestId: number;
@@ -107,6 +123,8 @@ const WEBVIEW_MESSAGE_TYPES = new Set<WebviewMessage['type']>([
   'selectVariant',
   'reload',
   'showOutput',
+  'setPlatform',
+  'toggleLock',
   '__test_snapshot_result',
 ]);
 
@@ -127,6 +145,11 @@ export function isPanelTarget(value: unknown): value is PanelTarget {
     typeof t.file === 'string' &&
     typeof t.exportName === 'string' &&
     typeof t.label === 'string' &&
-    (t.variant === null || typeof t.variant === 'string')
+    (t.variant === null || typeof t.variant === 'string') &&
+    (t.kind === undefined || t.kind === 'component' || t.kind === 'app') &&
+    (t.platform === undefined ||
+      t.platform === 'ios' ||
+      t.platform === 'android' ||
+      t.platform === 'web')
   );
 }

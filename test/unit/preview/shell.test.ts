@@ -1,7 +1,13 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isPanelTarget } from '../../../src/preview/protocol';
-import { findVariantFile, isVariantFile, listVariants } from '../../../src/preview/variants';
+import {
+  findVariantFile,
+  isVariantFile,
+  listAllVariants,
+  listInlineVariants,
+  listVariants,
+} from '../../../src/preview/variants';
 import { formatArgs, serialize } from '../../../webview/consoleBridge';
 import { customDevice, DEVICES, findDevice, orient } from '../../../webview/devices';
 
@@ -20,6 +26,42 @@ describe('variants', () => {
     expect(await listVariants(path.join(components, 'missing.preview.tsx'))).toEqual([]);
     expect(isVariantFile('a/Button.preview.jsx')).toBe(true);
     expect(isVariantFile('a/Button.tsx')).toBe(false);
+  });
+});
+
+describe('inline previews objects', () => {
+  it('reads a flat previews object for the default export (or the only component)', () => {
+    const src = `export default function Card() { return <View />; }
+      export const previews = { Primary: { title: 'Go' }, 'With space': {} } satisfies Record<string, object>;`;
+    expect(listInlineVariants(src, 'default')).toEqual(['Primary', 'With space']);
+    const named = `export function Button() { return <View />; } export const previews = { Big: {} };`;
+    expect(listInlineVariants(named, 'Button')).toEqual(['Big']);
+  });
+
+  it('reads previews keyed by export name', () => {
+    const src = `export function A() { return <View />; } export function B() { return <View />; }
+      export const previews = { A: { One: {} }, B: { Two: {}, Three: {} } };`;
+    expect(listInlineVariants(src, 'B')).toEqual(['Two', 'Three']);
+    expect(listInlineVariants(src, 'A')).toEqual(['One']);
+  });
+
+  it('applies a flat object only to the primary component, and ignores files without one', () => {
+    const src = `export default () => <View />; export function Other() { return <View />; }
+      export const previews = { X: {} };`;
+    expect(listInlineVariants(src, 'Other')).toEqual([]);
+    expect(listInlineVariants(`export const notPreviews = { X: {} };`, 'default')).toEqual([]);
+    expect(listInlineVariants('not { valid', 'default')).toEqual([]);
+  });
+
+  it('merges .preview file variants with inline ones (the file wins on name clashes)', async () => {
+    expect(await listAllVariants(path.join(components, 'Button.tsx'), 'Button')).toEqual({
+      variantFile: path.join(components, 'Button.preview.tsx'),
+      variants: [
+        { name: 'Primary', kind: 'file' },
+        { name: 'Disabled', kind: 'file' },
+        { name: 'Big', kind: 'props' },
+      ],
+    });
   });
 });
 

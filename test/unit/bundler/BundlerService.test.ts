@@ -231,7 +231,12 @@ describe('BundlerService', () => {
     const plain = key();
     const variant: BundleKey = {
       ...plain,
-      target: { ...plain.target, variant: { file: '/p/A.preview.tsx', name: 'Primary' } },
+      target: {
+        kind: 'component',
+        file: '/p/A.tsx',
+        exportName: 'default',
+        variant: { file: '/p/A.preview.tsx', name: 'Primary' },
+      },
     };
     const first = bundler.build(plain);
     await fake.flush();

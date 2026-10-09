@@ -149,3 +149,103 @@ The tests enforce the PRD targets (3 s cold, 300 ms warm p90); `RNLENS_COLD_BUDG
 ### D-31. `vscode.executeCodeLensProvider` needs the document open
 
 Calling it for a file that isn't open fails with "Illegal argument" in current VS Code, so the CodeLens test opens the document first.
+
+## Phase 3
+
+### D-32. App preview mounts however the app mounts itself
+
+Apps start in different ways:
+
+- **Expo's web `registerRootComponent`** uses its own `AppRegistry`, and renders into `document.getElementById('root')` as soon as the module loads.
+- **Bare apps** only call `AppRegistry.registerComponent`.
+- **`index.web.js` entries** may call `runApplication` themselves.
+
+Rather than intercepting each of these, every `react-dom/client` import in a preview resolves to `webview/runtime/reactDomClient.ts`, which tracks the roots it creates (the wrapper's own import of `react-dom/client` goes to the real module). The shell's mount element has `id="root"`. The app entry imports the user's entry module; if no root was created, it runs the last app registered with react-native-web's `AppRegistry`, wrapped in RN Lens's error boundary. Unmounting before the next bundle is `unmountAll()` over the tracked roots, which replaces the per-entry unmount hook from D-14.
+
+### D-33. expo-router: generated route context, and a "/" initial URL
+
+expo-router reads its routes through `expo-router/_ctx`, a Metro-only `require.context(appRoot, …)`. RN Lens resolves `expo-router/_ctx` to a generated module that imports every route file under `app/` (or `src/app/`). It uses the same exclusions as expo-router's own `_ctx` (API routes, `+middleware`, `+html`, `+native-intent`, `.d.ts`) and exposes `ctx(key)`, `ctx.keys()` and `ctx.resolve()`. It's regenerated on every build, so new routes appear. `EXPO_ROUTER_APP_ROOT`, `EXPO_ROUTER_ABS_APP_ROOT` and `EXPO_ROUTER_IMPORT_MODE` are defined as Metro would.
+
+On web, expo-router takes its initial route from `window.location`, and the webview's path is `/index.html`, which showed the not-found screen. The shell sets the path to `/` with `history.replaceState`. It must keep the query string: VS Code 1.90's webview service worker identifies the webview from `?id=…` when serving resources, and dropping it broke images and fonts served from the asset cache.
+
+### D-34. Metro-only development code is disabled
+
+These Expo development features assume a Metro dev server:
+
+- `expo/src/async-require/{setup,setupHMR,setupFastRefresh,messageSocket,hmr}`, which start HMR, Fast Refresh and the message socket. They load as empty modules.
+- `@expo/metro-runtime`, which is mocked.
+- `@expo/log-box/lib`, Expo's LogBox, which would draw a second error UI in a shadow root. It's mocked.
+
+RN Lens's overlay and output channel already cover errors and warnings.
+
+### D-35. The simulated platform applies to project code; libraries see `web` (refines BUILD_PROMPT's `EXPO_OS` define)
+
+Libraries branch on `Platform.OS` and `process.env.EXPO_OS` to choose native or web code. Reporting `ios` made Reanimated call `runOnUISync` ("not supported on web") and would push Expo modules onto native paths. So:
+
+- **`react-native` imports from `node_modules`** resolve to `reactNativeLibrary.ts`, whose `Platform` is react-native-web's (`OS: 'web'`).
+- **The project's own code** gets the simulated `Platform`.
+- **`@react-navigation/*`** is allow-listed to see the simulated platform, because it uses `Platform` only for look and feel and works with `ios` / `android` on web.
+- **`process.env.EXPO_OS`** is defined as `"web"` everywhere. BUILD_PROMPT said `"<plat>"`, but project code that needs the simulated platform should read `Platform.OS`.
+
+### D-36. React Native APIs missing from react-native-web are shimmed
+
+React Native 0.86 exports 26 public names that react-native-web 0.21 doesn't. An import of any of them, even deep in a library (for example `PlatformColor` in `expo-symbols`), failed the whole build with "No matching export". `webview/runtime/rnCompat.tsx` supplies all of them:
+
+- **Behavioural stand-ins** where web has a sensible equivalent: `PlatformColor` maps iOS semantic colours, `DynamicColorIOS` follows the scheme, `PermissionsAndroid` grants everything, `ToastAndroid` logs to the console, the `useAnimated*` hooks work, and `EventEmitter` is implemented.
+- **`View`-based components** for native-only views.
+- **No-op auto-mocks** for the rest.
+
+`TurboModuleRegistry` (PRD N-5) and `requireNativeComponent` are also provided. The list came from diffing `react-native/index.js` against react-native-web's exports, and should be re-checked when React Native adds public APIs.
+
+### D-37. Missing packages are auto-mocked by retrying the build (PRD N-3)
+
+esbuild has no hook for "this import failed to resolve", and catching every bare import in JavaScript would slow every build (see D-30). Instead, when a build fails and *every* error is `Could not resolve "<bare package>"`, those packages are added to that context's auto-mock set and the build is retried with a fresh context (at most 3 times). Successful builds pay nothing. Mixed failures, such as a syntax error alongside a missing package, are reported as they are.
+
+### D-38. Auto-mocks look like plain function components
+
+- **Named imports:** esbuild's CommonJS interop copies only a module's *own* properties into the import namespace, but inherits from its prototype. The auto-mock Proxy's `getPrototypeOf` therefore returns a Proxy that resolves any name, so `import { Marker } from 'mocked'` works.
+- **React introspection:** React probes `$$typeof`, `prototype.isReactComponent`, `defaultProps`, `contextType` and similar keys. Those read as absent, and `prototype` / `length` are the function's real ones; otherwise React treats the mock as a class or memo and fails.
+- **Subclasses:** `class X extends Mock {}` builds real `X` instances.
+
+### D-39. "Create mock for …" quick fix
+
+`MockDiagnostics` puts a warning on the quoted specifier in each project file that imports an auto-mocked package. Node built-ins (`node:*`) are excluded; mocks written for those would never be used in a browser. The quick fix:
+
+1. Reads how that file imports the package (default, named, namespace; type-only imports ignored).
+2. Writes a typed stub to `.rnlens/mocks/<package>.ts(x)`:
+   - PascalCase names become components that render a `View` with their children.
+   - UPPER_CASE names become constants.
+   - Everything else becomes a no-op function.
+3. Opens the stub and reloads the preview. It never overwrites an existing mock; it opens it instead.
+
+### D-40. Follow the active editor, and Toggle Lock (PRD F-7)
+
+F-7's "keep previewing a component while editing other files" implies an unlocked preview follows the active editor. While unlocked, switching to another JS/TS file in the project that exports a component retargets the preview, debounced by 250 ms. It doesn't follow into `node_modules`, `.rnlens/` (mocks and decorators), or files opened by clicking an error-overlay frame. App previews never follow. The lock is per panel, shown in the toolbar (🔒/🔓), in the title bar, and in the `rnLens.previewLocked` context key.
+
+### D-41. `onType` mode
+
+Edits debounced by 300 ms trigger a rebuild. The unsaved-buffers plugin serves `document.getText()` for open, dirty project files. Its esbuild filter lists the project's top-level entries (minus `node_modules`) because Go's regex engine has no lookaheads, and it matches Windows drive letters in either case, so `node_modules` files never reach JavaScript. Changing `rnLens.updateMode` reloads the preview.
+
+### D-42. Project configuration
+
+- **Sources, in increasing precedence:** Babel `module-resolver` aliases and `root`s (parsed with `@babel/parser`; only string literals, `^regex` aliases skipped, never executed), then `rnLens.extraAliases`, then `rnlens.config.js` `aliases`.
+- **Roots** become esbuild `nodePaths`.
+- **Aliases into project code** get platform variants (D-19). `tsconfig.json` `paths` are resolved natively by esbuild and don't.
+- **`rnlens.config.js` / `.cjs`** is loaded with `require`, with the require cache cleared so edits are re-read.
+- **ESM configs** (`.mjs`, or `require` failing with `ERR_REQUIRE_ESM`) are loaded with a native dynamic `import()`. It's wrapped in `new Function` because the CommonJS extension bundle would otherwise compile `import()` into `require`.
+- **Trust:** the config is only executed when `vscode.workspace.isTrusted`. Granting trust reloads the preview.
+- **Unknown options** are reported in the output channel.
+
+### D-43. Toolbar platform is per preview
+
+The toolbar's iOS / Android / Web selector changes the open preview only. It's persisted with the panel, so it survives a restart. Changing `rnLens.simulatedPlatform` applies the new value to the open preview, and new panels start from the setting.
+
+### D-44. Inline `previews` objects (PRD P-3)
+
+`export const previews = { Name: props }` applies to the file's default export, or, if there's none, its first exported component. If every key names an exported component and every value is an object, the object is keyed by export: `{ Button: { Primary: props } }`. These "props" variants are listed after the `.preview` file's variants; on a name clash, the `.preview` file wins. Saving the component file refreshes the list.
+
+### D-45. Integration-test notes
+
+- **The navigation test** presses on-screen elements through a `__test_press` webview hook: it clicks the innermost element whose text matches, and react-native-web's `Pressable` handles `click`.
+- **The follow test** opens the component in an editor before previewing, as in real use. With no editor open, the preview lands in the first group, and VS Code replaces it when a file opens in that group (documented in the README).
+- **Debug output:** `api.testing.recentLog()` exposes the last 300 output-channel lines, and failure messages include them.

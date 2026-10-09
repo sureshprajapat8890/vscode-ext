@@ -105,6 +105,12 @@ const toolbar = new Toolbar({
   onShowOutput() {
     post({ type: 'showOutput' });
   },
+  onPlatform(os) {
+    post({ type: 'setPlatform', platform: os });
+  },
+  onToggleLock() {
+    post({ type: 'toggleLock' });
+  },
 });
 
 const stage = el('main', 'stage');
@@ -257,6 +263,8 @@ function runBundle(id: number, code: string, css: string, buildMs: number): void
   document.querySelectorAll('style#react-native-stylesheet').forEach((s) => s.remove());
 
   const mount = el('div', 'rn-mount');
+  // Expo's registerRootComponent (and index.web.js entries) render into #root.
+  mount.id = 'root';
   rnRoot.replaceChildren(mount);
   globalThis.__RNLENS_ROOT__ = mount;
 
@@ -287,6 +295,18 @@ function runBundle(id: number, code: string, css: string, buildMs: number): void
   document.body.append(script);
 }
 
+/**
+ * Test hook: clicks the innermost element whose own text is exactly `text`. react-native-web
+ * Pressables handle `click`, which bubbles up from the text to the pressable.
+ */
+function pressByText(text: string): void {
+  const candidates = [...rnRoot.querySelectorAll<HTMLElement>('*')].filter(
+    (node) => node.innerText?.trim() === text,
+  );
+  const target = candidates.at(-1);
+  target?.click();
+}
+
 function resolvedFrames(frames: ProtocolFrame[], componentFrames: ProtocolFrame[]): OverlayFrame[] {
   const errorFrames = framesFromStack(frames);
   const components = framesFromStack(componentFrames.filter((f) => f.file));
@@ -298,6 +318,9 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
   switch (message.type) {
     case 'init': {
       state.target = message.target;
+      platform = message.platform;
+      toolbar.setPlatform(platform);
+      toolbar.setLocked(message.locked);
       if (!state.deviceId) {
         state.deviceId = findDevice(message.defaultDevice)
           ? message.defaultDevice
@@ -359,6 +382,9 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     case '__test_click_frame':
       overlay.clickLinked(message.index);
       break;
+    case '__test_press':
+      pressByText(message.text);
+      break;
     case '__test_set_env':
       if (message.deviceId !== undefined) state.deviceId = message.deviceId;
       if (message.scheme !== undefined) state.scheme = message.scheme;
@@ -367,6 +393,15 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
       break;
   }
 });
+
+// Apps that route by URL (expo-router, React Navigation linking on web) start at "/", not at the
+// webview's own document path. The query string must stay: VS Code's webview service worker uses
+// it to identify the webview when serving resources (images, fonts) to the page.
+try {
+  history.replaceState(history.state, '', `/${location.search}${location.hash}`);
+} catch {
+  // Not allowed in this environment; routers then fall back to their not-found screen.
+}
 
 applyDevice();
 post({ type: 'ready' });

@@ -13,7 +13,7 @@ import {
 import { createFlowStripMemory } from '../../../src/bundler/plugins/flowStrip';
 import { mockRegistryPlugin } from '../../../src/bundler/plugins/mockRegistry';
 import { resolveRuntimeDeps, type RuntimeDeps } from '../../../src/bundler/runtimeDeps';
-import type { BundleKey, PreviewTarget } from '../../../src/bundler/types';
+import type { BundleKey, ComponentTarget, PreviewTarget } from '../../../src/bundler/types';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const projectRoot = path.join(__dirname, '../fixtures/hello-project');
@@ -39,8 +39,8 @@ afterAll(() => {
 function target(
   file: string,
   exportName: string,
-  variant?: PreviewTarget['variant'],
-): PreviewTarget {
+  variant?: ComponentTarget['variant'],
+): ComponentTarget {
   return { kind: 'component', file: path.join(components, file), exportName, variant };
 }
 

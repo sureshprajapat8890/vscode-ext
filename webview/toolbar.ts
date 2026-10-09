@@ -13,6 +13,8 @@ export interface ToolbarHandlers {
   onVariant(name: string | null): void;
   onReload(): void;
   onShowOutput(): void;
+  onPlatform(os: SimulatedOS): void;
+  onToggleLock(): void;
 }
 
 const OS_LABEL: Record<SimulatedOS, string> = { ios: 'iOS', android: 'Android', web: 'Web' };
@@ -64,7 +66,8 @@ export class Toolbar {
   private readonly customGroup: HTMLElement;
   private readonly customWidth: HTMLInputElement;
   private readonly customHeight: HTMLInputElement;
-  private readonly platform: HTMLElement;
+  private readonly platform: HTMLSelectElement;
+  private readonly lock: HTMLButtonElement;
   private readonly scheme: HTMLButtonElement;
   private readonly variant: HTMLSelectElement;
   private readonly zoom: HTMLSelectElement;
@@ -101,9 +104,14 @@ export class Toolbar {
     const rotate = button('⟳', 'Rotate', () => h.onRotate());
     rotate.classList.add('tb-rotate');
 
-    this.platform = document.createElement('span');
-    this.platform.className = 'tb-platform';
-    this.platform.title = 'Simulated platform (setting: rnLens.simulatedPlatform)';
+    this.platform = select('Simulated platform', (v) => h.onPlatform(v as SimulatedOS));
+    for (const os of ['ios', 'android', 'web'] as const)
+      this.platform.append(option(os, OS_LABEL[os]));
+
+    this.lock = button('🔓', 'Lock preview (stop following the active editor)', () =>
+      h.onToggleLock(),
+    );
+    this.lock.setAttribute('aria-pressed', 'false');
 
     this.scheme = button('☀', 'Toggle light/dark color scheme', () => h.onToggleScheme());
     this.scheme.setAttribute('aria-pressed', 'false');
@@ -135,6 +143,7 @@ export class Toolbar {
       this.customGroup,
       rotate,
       this.platform,
+      this.lock,
       this.scheme,
       this.variant,
       this.zoom,
@@ -162,8 +171,18 @@ export class Toolbar {
     this.scheme.setAttribute('aria-pressed', String(scheme === 'dark'));
   }
 
+  setLocked(locked: boolean): void {
+    this.lock.textContent = locked ? '🔒' : '🔓';
+    this.lock.setAttribute('aria-pressed', String(locked));
+    const title = locked
+      ? 'Unlock preview (follow the active editor)'
+      : 'Lock preview (stop following the active editor)';
+    this.lock.title = title;
+    this.lock.setAttribute('aria-label', title);
+  }
+
   setPlatform(os: SimulatedOS): void {
-    this.platform.textContent = OS_LABEL[os];
+    this.platform.value = os;
   }
 
   setVariants(names: readonly string[], selected: string | null): void {

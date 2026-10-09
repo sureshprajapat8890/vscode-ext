@@ -34,6 +34,66 @@ export class Uri {
   }
 }
 
+export class Position {
+  constructor(
+    readonly line: number,
+    readonly character: number,
+  ) {}
+}
+
+export class Range {
+  readonly start: Position;
+  readonly end: Position;
+  constructor(startLine: number, startCharacter: number, endLine: number, endCharacter: number) {
+    this.start = new Position(startLine, startCharacter);
+    this.end = new Position(endLine, endCharacter);
+  }
+}
+
+export enum DiagnosticSeverity {
+  Error = 0,
+  Warning = 1,
+  Information = 2,
+  Hint = 3,
+}
+
+export class Diagnostic {
+  source?: string;
+  code?: string | number | { value: string | number; target: Uri };
+  constructor(
+    readonly range: Range,
+    readonly message: string,
+    readonly severity: DiagnosticSeverity = DiagnosticSeverity.Error,
+  ) {}
+}
+
+export class CodeActionKind {
+  static readonly QuickFix = new CodeActionKind('quickfix');
+  constructor(readonly value: string) {}
+}
+
+export class CodeAction {
+  diagnostics?: Diagnostic[];
+  isPreferred?: boolean;
+  command?: { command: string; title: string; arguments?: unknown[] };
+  constructor(
+    readonly title: string,
+    readonly kind?: CodeActionKind,
+  ) {}
+}
+
+export const diagnosticsState = new Map<string, Diagnostic[]>();
+
+export const languages = {
+  createDiagnosticCollection(_name: string) {
+    return {
+      set: (uri: Uri, diagnostics: Diagnostic[]) => diagnosticsState.set(uri.fsPath, diagnostics),
+      delete: (uri: Uri) => diagnosticsState.delete(uri.fsPath),
+      dispose: () => diagnosticsState.clear(),
+    };
+  },
+};
+
 export interface MockWatcher {
   pattern: string;
   create: EventEmitter<Uri>;

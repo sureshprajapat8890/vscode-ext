@@ -82,11 +82,6 @@ body {
   outline-offset: 1px;
 }
 
-.tb-platform {
-  padding: 0 4px;
-  color: var(--vscode-descriptionForeground);
-}
-
 .tb-badge.has-warnings,
 .tb-mocks {
   color: var(--vscode-editorWarning-foreground);
