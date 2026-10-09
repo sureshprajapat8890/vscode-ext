@@ -1,10 +1,21 @@
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { BundlerService } from './bundler/BundlerService';
+import {
+  COMPONENT_SELECTOR,
+  ComponentCodeLensProvider,
+} from './codelens/ComponentCodeLensProvider';
 import { detectComponents, pickDefaultComponent } from './codelens/componentDetection';
 import type { RNProject } from './project/detectProject';
 import { ProjectRegistry } from './project/projectRegistry';
-import { PreviewPanelManager, type PreviewSnapshot } from './preview/PreviewPanelManager';
+import {
+  PREVIEW_VIEW_TYPE,
+  PreviewPanelManager,
+  type PreviewEnvOverride,
+  type PreviewSnapshot,
+} from './preview/PreviewPanelManager';
+import { isPanelTarget } from './preview/protocol';
+import { PreviewStatusBar } from './preview/statusBar';
 import { UserError } from './util/errors';
 import { disposeLog, getLog } from './util/log';
 import { safeCommand } from './util/safeCommand';
@@ -24,6 +35,10 @@ export interface RNLensApi {
   /** Only present when the extension runs under the VS Code test runner. */
   testing?: {
     snapshot(): Promise<PreviewSnapshot | undefined>;
+    clickOverlayFrame(index: number): void;
+    selectVariant(name: string | null): Promise<void>;
+    buildTimes(): readonly number[];
+    setEnv(env: PreviewEnvOverride): void;
     contextCount(): number;
     closePreview(): Promise<void>;
   };
@@ -43,12 +58,41 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
   log.info(`RN Lens ${String(context.extension.packageJSON.version)} activating`);
 
   const projects = new ProjectRegistry();
+  const dist = vscode.Uri.joinPath(context.extensionUri, 'dist');
+  const cacheDir = vscode.Uri.joinPath(context.globalStorageUri, 'cache').fsPath;
   const bundler = new BundlerService({
     vendorDir: vscode.Uri.joinPath(context.extensionUri, 'vendor').fsPath,
+    runtimeDir: vscode.Uri.joinPath(dist, 'runtime').fsPath,
+    mocksDir: vscode.Uri.joinPath(dist, 'mocks').fsPath,
+    cacheDir,
     onDepsWarning: (message) => log.warn(message),
   });
-  const previews = new PreviewPanelManager(context.extensionUri, bundler, projects);
+  const status = new PreviewStatusBar();
+  const previews = new PreviewPanelManager(
+    context.extensionUri,
+    cacheDir,
+    bundler,
+    projects,
+    status,
+  );
+  const codeLenses = new ComponentCodeLensProvider(projects);
   context.subscriptions.push(
+    status,
+    vscode.languages.registerCodeLensProvider(COMPONENT_SELECTOR, codeLenses),
+    vscode.workspace.onDidCloseTextDocument((doc) => codeLenses.forget(doc)),
+    vscode.window.registerWebviewPanelSerializer(PREVIEW_VIEW_TYPE, {
+      async deserializeWebviewPanel(panel, state: unknown) {
+        const target = (state as { target?: unknown } | undefined)?.target;
+        if (!isPanelTarget(target)) {
+          panel.dispose();
+          return;
+        }
+        await previews.restore(panel, target).catch((err: unknown) => {
+          log.warn(`Could not restore the RN Lens preview of ${target.file}`, err);
+          panel.dispose();
+        });
+      },
+    }),
     projects.onDidChange((found) => {
       for (const p of found) bundler.invalidateProject(p.root);
     }),
@@ -95,6 +139,14 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
     }),
 
     safeCommand('rnLens.reload', () => previews.reload()),
+
+    safeCommand('rnLens.clearCache', async () => {
+      await bundler.clearCache();
+      log.info('Cleared the RN Lens build cache.');
+      await previews.rebuildIfOpen();
+    }),
+
+    safeCommand('rnLens.showOutput', () => log.show(true)),
   );
 
   const ready = projects.refresh().catch((err: unknown) => {
@@ -105,6 +157,10 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
   if (context.extensionMode === vscode.ExtensionMode.Test) {
     api.testing = {
       snapshot: () => previews.snapshot(),
+      clickOverlayFrame: (index) => previews.clickOverlayFrame(index),
+      selectVariant: (name) => previews.selectVariantForTest(name),
+      buildTimes: () => previews.buildTimes,
+      setEnv: (env) => previews.setEnv(env),
       contextCount: () => bundler.contextCount,
       closePreview: () => previews.close(),
     };

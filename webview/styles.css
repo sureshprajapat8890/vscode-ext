@@ -20,29 +20,97 @@ body {
   height: 100%;
 }
 
+/* ---- Toolbar ---------------------------------------------------------------------------- */
+
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 4px 12px;
+  gap: 6px;
+  padding: 4px 8px;
   min-height: 28px;
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
   background: var(--vscode-editorWidget-background);
 }
 
-.toolbar .device-name {
-  font-weight: 600;
+.tb-select,
+.tb-number {
+  height: 22px;
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-contrastBorder, transparent));
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  font: inherit;
+  border-radius: 2px;
 }
 
-.toolbar .status {
+.tb-number {
+  width: 56px;
+  padding: 0 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-color: var(--vscode-input-border, transparent);
+}
+
+.tb-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tb-button {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tb-button:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.tb-select:focus-visible,
+.tb-number:focus-visible,
+.tb-button:focus-visible,
+.frame-link:focus-visible,
+.overlay-dismiss:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.tb-platform {
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tb-badge.has-warnings,
+.tb-mocks {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.tb-badge.has-errors {
+  color: var(--vscode-errorForeground);
+}
+
+.tb-status {
   margin-left: auto;
   color: var(--vscode-descriptionForeground);
   font-variant-numeric: tabular-nums;
 }
 
-.toolbar .status.error {
+.tb-status.error {
   color: var(--vscode-errorForeground);
 }
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---- Stage and device frame ------------------------------------------------------------- */
 
 .stage {
   position: relative;
@@ -53,6 +121,11 @@ body {
   padding: 16px;
   overflow: hidden;
   min-height: 0;
+}
+
+.stage.scrollable {
+  overflow: auto;
+  justify-content: safe center;
 }
 
 /* Takes the scaled size of the frame so layout and centering follow the zoom. */
@@ -83,6 +156,12 @@ body {
   background: #ffffff;
   color: #000000;
   color-scheme: light;
+}
+
+.screen[data-scheme='dark'] {
+  background: #000000;
+  color: #ffffff;
+  color-scheme: dark;
 }
 
 #rn-root {
@@ -118,22 +197,47 @@ body {
   z-index: 2;
 }
 
+.frame[data-platform='android'] .status-bar {
+  padding: 0 20px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .status-bar .icons {
   letter-spacing: 2px;
   font-size: 12px;
 }
 
-.island {
+.cutout {
   position: absolute;
-  top: 11px;
   left: 50%;
+  background: #000000;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.cutout.dynamicIsland {
+  top: 11px;
   width: 125px;
   height: 37px;
   margin-left: -62.5px;
   border-radius: 20px;
-  background: #000000;
-  pointer-events: none;
-  z-index: 3;
+}
+
+.cutout.notch {
+  top: 0;
+  width: 160px;
+  height: 30px;
+  margin-left: -80px;
+  border-radius: 0 0 18px 18px;
+}
+
+.cutout.punchHole {
+  top: 10px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
 }
 
 .home-indicator {
@@ -144,10 +248,19 @@ body {
   height: 5px;
   margin-left: -67px;
   border-radius: 3px;
-  background: #000000;
+  background: currentColor;
+  opacity: 0.85;
   pointer-events: none;
   z-index: 3;
 }
+
+.frame[data-platform='android'] .home-indicator {
+  width: 108px;
+  height: 4px;
+  margin-left: -54px;
+}
+
+/* ---- Error overlay ---------------------------------------------------------------------- */
 
 .overlay {
   position: absolute;
@@ -156,12 +269,8 @@ body {
   flex-direction: column;
   padding: 16px;
   overflow: auto;
-  background: color-mix(in srgb, var(--vscode-editor-background) 92%, transparent);
+  background: color-mix(in srgb, var(--vscode-editor-background) 94%, transparent);
   z-index: 10;
-}
-
-.overlay[hidden] {
-  display: none;
 }
 
 .overlay-header {
@@ -185,16 +294,43 @@ body {
   cursor: pointer;
 }
 
-.overlay-dismiss:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder);
-}
-
-.overlay-body {
-  margin: 12px 0 0;
+.overlay-message {
+  margin: 12px 0 8px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--vscode-editor-font-size);
+}
+
+.overlay-frames {
+  margin: 0;
+  padding-left: 20px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+}
+
+.stack-frame {
+  padding: 1px 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.stack-frame.primary {
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.frame-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.frame-link:hover {
+  text-decoration: underline;
 }
 
 .disclaimer {

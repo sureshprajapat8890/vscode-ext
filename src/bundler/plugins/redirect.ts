@@ -1,6 +1,22 @@
-import type { OnResolveArgs, OnResolveResult, PluginBuild } from 'esbuild';
+import type {
+  ImportKind,
+  OnResolveArgs,
+  OnResolveResult,
+  PluginBuild,
+  ResolveResult,
+} from 'esbuild';
 
 const SKIP = '__rnlensRedirected';
+
+/** Runs esbuild's resolver for `specifier` from `resolveDir`, bypassing RN Lens's redirect plugins. */
+export function resolveRaw(
+  build: PluginBuild,
+  specifier: string,
+  resolveDir: string,
+  kind: ImportKind,
+): Promise<ResolveResult> {
+  return build.resolve(specifier, { kind, resolveDir, pluginData: { [SKIP]: true } });
+}
 
 /**
  * Resolves `specifier` as if it were imported from `resolveDir`, returning an esbuild resolve result.

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": ["react"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "paths": {
+      "react-native": ["./webview/runtime/reactNative.ts"],
+      "rnlens:runtime/*": ["./webview/runtime/*"]
+    }
+  },
+  "include": ["webview/runtime/**/*", "src/mocks/**/*"],
+  "exclude": ["src/mocks/index.ts"]
+}

@@ -1,7 +1,17 @@
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { BundlerService } from '../../../src/bundler/BundlerService';
+import { BundlerService, bundleFingerprint } from '../../../src/bundler/BundlerService';
 import type { RuntimeDeps } from '../../../src/bundler/runtimeDeps';
 import type { BundleKey } from '../../../src/bundler/types';
+
+const PATHS = {
+  vendorDir: '/v',
+  runtimeDir: '/r',
+  mocksDir: '/m',
+  cacheDir: mkdtempSync(path.join(os.tmpdir(), 'rnlens-svc-')),
+};
 
 const deps: RuntimeDeps = {
   reactResolveDir: '/v',
@@ -61,7 +71,7 @@ function fakeEsbuild() {
 
 function service(fake: ReturnType<typeof fakeEsbuild>, onDepsWarning = vi.fn()) {
   return new BundlerService({
-    vendorDir: '/v',
+    ...PATHS,
     loadEsbuild: async () => fake.esbuild as never,
     resolveDeps: vi.fn(async () => deps),
     onDepsWarning,
@@ -69,7 +79,7 @@ function service(fake: ReturnType<typeof fakeEsbuild>, onDepsWarning = vi.fn()) 
 }
 
 describe('BundlerService', () => {
-  it('returns code, css, map and absolute warning locations', async () => {
+  it('returns code, css and absolute warning locations', async () => {
     const fake = fakeEsbuild();
     const onWarn = vi.fn();
     const bundler = service(fake, onWarn);
@@ -77,7 +87,8 @@ describe('BundlerService', () => {
     await fake.flush();
     fake.pending[0].resolve(fake.output('code'));
     const r = await result;
-    expect(r).toMatchObject({ ok: true, code: 'code', css: '.a{}', map: '{"map":1}' });
+    expect(r).toMatchObject({ ok: true, code: 'code', css: '.a{}' });
+    expect(r).not.toHaveProperty('map');
     expect(r.warnings[0]).toMatchObject({ line: 2, column: 4, lineText: 'x' });
     expect(r.warnings[0].file?.replace(/\\/g, '/')).toMatch(/\/p\/src\/A\.tsx$/);
     expect(onWarn).toHaveBeenCalledWith('note');
@@ -153,7 +164,7 @@ describe('BundlerService', () => {
     expect(await result).toMatchObject({ ok: false, errors: [{ text: 'boom' }] });
 
     const failing = new BundlerService({
-      vendorDir: '/v',
+      ...PATHS,
       loadEsbuild: async () => fake.esbuild as never,
       resolveDeps: vi
         .fn()
@@ -185,7 +196,7 @@ describe('BundlerService', () => {
     const fake = fakeEsbuild();
     const resolveDeps = vi.fn(async () => deps);
     const bundler = new BundlerService({
-      vendorDir: '/v',
+      ...PATHS,
       loadEsbuild: async () => fake.esbuild as never,
       resolveDeps,
     });
@@ -214,9 +225,74 @@ describe('BundlerService', () => {
     expect(fake.contexts[1].disposed).toBe(true);
   });
 
+  it('keeps one context across variant switches and builds the latest target', async () => {
+    const fake = fakeEsbuild();
+    const bundler = service(fake);
+    const plain = key();
+    const variant: BundleKey = {
+      ...plain,
+      target: { ...plain.target, variant: { file: '/p/A.preview.tsx', name: 'Primary' } },
+    };
+    const first = bundler.build(plain);
+    await fake.flush();
+    fake.pending[0].resolve(fake.output('plain'));
+    await first;
+    const second = bundler.build(variant);
+    await fake.flush();
+    fake.pending[1].resolve(fake.output('variant'));
+    expect(await second).toMatchObject({ ok: true, code: 'variant' });
+    expect(fake.esbuild.context).toHaveBeenCalledTimes(1);
+    const options = fake.esbuild.context.mock.calls[0] as unknown as [
+      { plugins: { name: string }[] },
+    ];
+    expect(options[0].plugins.map((p) => p.name)).toContain('rnlens-virtual-entry');
+  });
+
+  it('builds source maps on demand in a second context and fingerprints the code', async () => {
+    const fake = fakeEsbuild();
+    const bundler = service(fake);
+    expect(await bundler.sourceMapFor(key())).toBeUndefined();
+    const built = bundler.build(key());
+    await fake.flush();
+    fake.pending[0].resolve(fake.output('const a = 1;\n'));
+    await built;
+    const mapped = bundler.sourceMapFor(key());
+    await fake.flush();
+    fake.pending[1].resolve(fake.output('const a = 1;\n//# sourceMappingURL=preview.js.map\n'));
+    expect(await mapped).toEqual({
+      map: '{"map":1}',
+      fingerprint: bundleFingerprint('const a = 1;\n'),
+    });
+    expect(fake.esbuild.context).toHaveBeenCalledTimes(2);
+    const optionsOf = (call: number) =>
+      (fake.esbuild.context.mock.calls[call] as unknown as [{ sourcemap: unknown }])[0];
+    expect(optionsOf(0).sourcemap).toBe(false);
+    expect(optionsOf(1).sourcemap).toBe('external');
+
+    const failing = bundler.sourceMapFor(key());
+    await fake.flush();
+    fake.pending[2].reject(new Error('boom'));
+    expect(await failing).toBeUndefined();
+    await bundler.release(key());
+    expect(fake.contexts.every((c) => c.disposed)).toBe(true);
+  });
+
+  it('clearCache disposes contexts and deletes the cache directory', async () => {
+    const fake = fakeEsbuild();
+    const bundler = service(fake);
+    mkdirSync(path.join(PATHS.cacheDir, 'flow'), { recursive: true });
+    writeFileSync(path.join(PATHS.cacheDir, 'flow', 'x.js'), '');
+    void bundler.build(key());
+    await fake.flush();
+    await bundler.clearCache();
+    expect(bundler.contextCount).toBe(0);
+    expect(fake.contexts[0].disposed).toBe(true);
+    expect(existsSync(PATHS.cacheDir)).toBe(false);
+  });
+
   it('tolerates disposing a context that failed to start', async () => {
     const bundler = new BundlerService({
-      vendorDir: '/v',
+      ...PATHS,
       loadEsbuild: async () => {
         throw new Error('no esbuild');
       },

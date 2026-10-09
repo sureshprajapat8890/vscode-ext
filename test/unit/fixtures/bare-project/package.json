@@ -1,0 +1,1 @@
+{ "name": "bare-project", "private": true, "dependencies": { "react-native": "*" } }

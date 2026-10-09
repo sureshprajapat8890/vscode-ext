@@ -1,5 +1,12 @@
 export type SimulatedPlatform = 'ios' | 'android' | 'web';
 
+export interface VariantRef {
+  /** Absolute path of the `<Name>.preview.*` file. */
+  file: string;
+  /** Named export of that file to render. */
+  name: string;
+}
+
 /** What a preview renders. App-level targets arrive in a later phase. */
 export interface ComponentTarget {
   kind: 'component';
@@ -7,6 +14,8 @@ export interface ComponentTarget {
   file: string;
   /** Export to render: an identifier, or `"default"`. */
   exportName: string;
+  /** Render this variant instead of the bare component. Not part of the context key. */
+  variant?: VariantRef;
 }
 
 export type PreviewTarget = ComponentTarget;
@@ -28,14 +37,19 @@ export interface BuildMessage {
   lineText?: string;
 }
 
+export interface MockedPackage {
+  specifier: string;
+  source: 'project' | 'built-in' | 'auto';
+  note?: string;
+}
+
 export interface BundleSuccess {
   ok: true;
   code: string;
   css: string;
-  /** External source map (JSON) for `code`; kept in the extension host for error mapping. */
-  map: string;
   buildMs: number;
   warnings: BuildMessage[];
+  mocked: MockedPackage[];
 }
 
 export interface BundleFailure {
@@ -47,6 +61,7 @@ export interface BundleFailure {
 
 export type BundleResult = BundleSuccess | BundleFailure;
 
+/** Identifies an esbuild context. Variants are excluded: switching one only regenerates the entry. */
 export function bundleKeyId(key: BundleKey): string {
   const t = key.target;
   return JSON.stringify([key.projectRoot, key.platform, t.kind, t.file, t.exportName]);

@@ -1,6 +1,6 @@
 // Builds the extension host and webview bundles (or, with --tests, the integration test bundles).
 import * as esbuild from 'esbuild';
-import { readdirSync } from 'node:fs';
+import { cpSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
 const args = new Set(process.argv.slice(2));
@@ -16,8 +16,9 @@ const extensionOptions = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  // esbuild is loaded lazily at runtime from node_modules (it ships native binaries).
-  external: ['vscode', 'esbuild'],
+  // Loaded lazily at runtime from node_modules: esbuild ships native binaries, and
+  // flow-remove-types pulls in a multi-megabyte parser only needed for Flow-typed packages.
+  external: ['vscode', 'esbuild', 'flow-remove-types'],
   sourcemap: !production,
   minify: production,
   logLevel: 'info',
@@ -57,6 +58,25 @@ const testOptions = {
 };
 
 const builds = tests ? [testOptions] : [extensionOptions, webviewOptions];
+
+/**
+ * Preview runtime and built-in mocks are bundled into each preview by the user's esbuild context,
+ * so they ship as source next to the extension bundle.
+ */
+function copyPreviewSources() {
+  cpSync('webview/runtime', 'dist/runtime', { recursive: true });
+  cpSync('src/mocks', 'dist/mocks', {
+    recursive: true,
+    filter: (src) =>
+      path.basename(src) !== 'index.ts' || path.dirname(src) !== path.normalize('src/mocks'),
+  });
+}
+
+if (!tests) {
+  // Start from an empty dist/ so nothing stale (e.g. a dev build's source map) gets packaged.
+  rmSync('dist', { recursive: true, force: true });
+  copyPreviewSources();
+}
 
 if (watch) {
   for (const options of builds) {

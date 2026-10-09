@@ -14,5 +14,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["webview/**/*.ts", "src/preview/protocol.ts"]
+  "include": ["webview/**/*.ts", "src/preview/protocol.ts", "webview/runtime/host.ts"],
+  "exclude": ["webview/runtime/**"]
 }

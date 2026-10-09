@@ -5,3 +5,4 @@ coverage/
 .vscode-test/
 *.vsix
 vendor/node_modules/
+!test/unit/fixtures/hello-project/node_modules/

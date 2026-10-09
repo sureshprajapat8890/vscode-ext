@@ -8,4 +8,8 @@
 !LICENSE
 !node_modules/esbuild/**
 !node_modules/@esbuild/**
+!node_modules/flow-remove-types/**
+!node_modules/flow-parser/**
+!node_modules/vlq/**
+!node_modules/pirates/**
 dist/**/*.map

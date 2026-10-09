@@ -3,7 +3,12 @@ import path from 'node:path';
 import Mocha from 'mocha';
 
 export function run(): Promise<void> {
-  const mocha = new Mocha({ ui: 'bdd', color: true, timeout: 60_000 });
+  const mocha = new Mocha({
+    ui: 'bdd',
+    color: true,
+    timeout: 60_000,
+    grep: process.env.MOCHA_GREP,
+  });
   for (const file of readdirSync(__dirname)) {
     if (file.endsWith('.test.js')) {
       mocha.addFile(path.join(__dirname, file));

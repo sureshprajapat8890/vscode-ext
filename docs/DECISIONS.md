@@ -82,6 +82,70 @@ The extension loads esbuild lazily on the first preview, as an external module, 
 
 `vendor/package.json` + `package-lock.json` are committed; `vendor/node_modules` is git-ignored and installed by the root `postinstall` script (`npm ci --prefix vendor --ignore-scripts`). The packaged VSIX includes it.
 
-### D-18. Not yet handled (later phases)
+### D-18. Not yet handled in Phase 1
 
-`react-native/*` sub-path imports, images/fonts, Flow-typed packages and native modules still fail with esbuild's error in the overlay. These are Phase 2 (assets, flowStrip, mocks) and Phase 3 (autoMock).
+`react-native/*` sub-path imports, images/fonts, Flow-typed packages and native modules failed with esbuild's error in the overlay in Phase 1. Phase 2 handles them (see D-19 onwards).
+
+## Phase 2
+
+### D-19. Libraries resolve as on web; platform files apply to project code only (deviates from PRD B-3)
+
+PRD B-3 orders `.web.*`, `.<platform>.*`, `.native.*`, then plain, for every file. Applied to `node_modules`, that picks native implementations: for example `expo-modules-core` ships `NativeViewManagerAdapter.native.tsx` (native, imports `react-native/Libraries/*`) next to a plain web version, and the preview broke on it. Expo's own Metro web config resolves libraries as `.web.*`, then plain. So esbuild's global `resolveExtensions` are web-first. A small `platformExtensions` plugin applies the full PRD order to relative imports in the project's own code, which is where `Screen.ios.tsx` / `Screen.android.tsx` live. Aliased imports (tsconfig `paths`) get web-first resolution for now.
+
+### D-20. `react-native` resolves to a wrapper module; Dimensions and Appearance are patched in place
+
+`react-native` maps to `webview/runtime/reactNative.ts`, which re-exports react-native-web but overrides `Platform` (reports the simulated OS), `SafeAreaView` (device insets) and `NativeModules` (auto-mock Proxy). react-native-web's internals keep seeing `web`. `Dimensions` and `Appearance` are patched in place, because react-native-web's own `useWindowDimensions`, `useColorScheme` and `PixelRatio` read them. The webview shell owns device state and exposes it through `globalThis.__RNLENS_HOST__` (`webview/runtime/host.ts`). Its listeners are reset before each bundle runs.
+
+### D-21. Source maps are built on demand, verified by fingerprint (refines D-11)
+
+Generating source maps was a sizeable share of every warm rebuild, but a map is only needed when an error happens. Normal rebuilds skip maps. On the first runtime error, `BundlerService.sourceMapFor` rebuilds the same target in a second, lazily created context with `sourcemap: 'external'`. esbuild is deterministic, so the map is used only if its code fingerprint (ignoring the `sourceMappingURL` comment) matches the bundle running in the preview. Otherwise frames are shown unmapped rather than wrongly mapped.
+
+### D-22. flow-remove-types over sucrase, loaded lazily
+
+flow-remove-types tracks the official Flow parser, so it keeps up with new Flow syntax used in React Native's own sources. Sucrase's Flow support lags behind. Its parser is large, so `flow-remove-types` is external to the extension bundle and `import()`ed the first time a Flow file is seen. Detection checks every leading comment block for `@flow` (React Native puts it several lines into the header), or `import type` / `export type`. Results are memoised per session and cached on disk by path, mtime and size.
+
+### D-23. Mocks and preview runtime ship as TypeScript sources
+
+Built-in mocks (`src/mocks/*`) and the preview runtime (`webview/runtime/*`) are bundled into each preview by the user's esbuild context, against the user's React. So the build copies them as source into `dist/mocks` and `dist/runtime` instead of compiling them. `src/mocks/index.ts` is the extension-side registry and isn't copied. They're type-checked by `tsconfig.preview.json`, which maps `react-native` to the wrapper and `rnlens:runtime/*` to the runtime. Mocks import runtime helpers through the virtual `rnlens:runtime/<module>` specifier, so they work from both the source tree and `dist`.
+
+### D-24. Auto-mocks for React Native internals and Node built-ins pulled forward
+
+PRD B-2 (P0) requires `react-native/Libraries/*` sub-paths to be shimmed or mocked, so they become auto-mocks now instead of in Phase 3. `node:*` imports always become auto-mocks; bare built-in names (`fs`, `events`, …) only when the project has no browser polyfill package of that name. Expo's `expo-font` imports `node:async_hooks` on a server-rendering path. Each auto-mock logs a one-time warning naming the module and how to replace it.
+
+### D-25. Packages nested in `expo/node_modules` are resolvable
+
+npm sometimes nests Expo's own dependencies (in the fixture, `expo-asset`) under `node_modules/expo/node_modules`. Expo's resolver makes them importable from the app, but plain Node resolution doesn't. That directory is added to esbuild's `nodePaths` fallback, ahead of the vendor directory.
+
+### D-26. safe-area-context is a full mock, not its web build
+
+The library's web build measures CSS `env(safe-area-inset-*)`, which is always 0 in an editor panel. The mock implements its public API (`SafeAreaProvider`, `SafeAreaView` with `edges` / `mode`, hooks, contexts, `initialWindowMetrics`, `withSafeAreaInsets`) on top of the simulated device's insets, which follow rotation.
+
+### D-27. Asset modules are CommonJS; fonts are URL strings
+
+Images export `module.exports = { uri, width, height, scale }`, so both `require('./a.png')` (React Native style) and `import a from './a.png'` give the object react-native-web's `Image` expects. Fonts export a URL string, which is what expo-font / expo-asset accept on web. Without that, `@expo/vector-icons` fails to load its glyph fonts.
+
+### D-28. Console bridge lives in the shell
+
+CONTRIBUTING lists `webview/runtime/consoleBridge.ts`. The bridge wraps `console` in the webview shell before any bundle runs (the bundle shares the window), so it's `webview/consoleBridge.ts`. `webview/runtime/` is reserved for code bundled into previews.
+
+### D-29. Test-only webview messages
+
+Integration tests drive the webview through `__test_snapshot` (rendered text, overlay state, device), `__test_click_frame` and `__test_set_env`. The extension only exposes these through `api.testing` when `context.extensionMode === Test`.
+
+### D-30. Measured performance and test budgets
+
+Each esbuild `onResolve` / `onLoad` callback that matches is a round trip between esbuild's Go process and JavaScript, so plugin filters are kept narrow. The platform-extensions filter is built from the names of the project's actual platform-specific files (found by a one-time scan, ignoring node_modules), instead of matching every relative import. That cut the warm-build p90 from about 290 ms to about 200 ms. Saving any `*.ios|android|native.*` file recreates the context so new names are picked up.
+
+On the development machine (Windows, with other load), the integration suite measures:
+
+| Metric | Latest stable VS Code | VS Code 1.90.0 |
+|---|---|---|
+| Cold preview, including webview creation | about 1.8 s | about 1.6 s |
+| Warm build p90 over 20 edits | about 190 ms | about 220 ms |
+| Save → rendered p90 | about 330 ms | about 380 ms |
+
+The tests enforce the PRD targets (3 s cold, 300 ms warm p90); `RNLENS_COLD_BUDGET_MS` / `RNLENS_WARM_BUDGET_MS` can loosen them on slow CI machines. Most of the remaining end-to-end time is re-evaluating React and react-native-web on every change. Fast Refresh (Phase 4), or splitting them into a separate vendor bundle, is the way to reduce it.
+
+### D-31. `vscode.executeCodeLensProvider` needs the document open
+
+Calling it for a file that isn't open fails with "Illegal argument" in current VS Code, so the CodeLens test opens the document first.

@@ -18,14 +18,19 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.strict,
   {
-    files: ['**/*.ts'],
+    files: ['**/*.ts', '**/*.tsx'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/consistent-type-imports': 'error',
+      // Mocks mirror real APIs, so some parameters are deliberately unused (prefixed with _).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
+      ],
     },
   },
   {
-    files: ['webview/**/*.ts'],
+    files: ['webview/**/*.ts', 'webview/**/*.tsx', 'src/mocks/**/*.ts', 'src/mocks/**/*.tsx'],
     languageOptions: { globals: globals.browser },
   },
   {
