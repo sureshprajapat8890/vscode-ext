@@ -82,10 +82,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Build with the runner's own esbuild, then reinstall for the target platform. Scripts are
+      # skipped on that reinstall: esbuild's install script would otherwise download the *runner's*
+      # binary into the package when runner and target differ (e.g. x64 runner, arm64 target).
+      - run: npm ci
+      - run: npm run build
       - name: Install dependencies for ${{ matrix.target }}
         shell: bash
-        run: npm ci --os=${{ matrix.npm_os }} --cpu=${{ matrix.npm_cpu }} ${{ matrix.npm_libc && format('--libc={0}', matrix.npm_libc) || '' }}
-      - run: npm run build
+        run: |
+          npm ci --ignore-scripts --os=${{ matrix.npm_os }} --cpu=${{ matrix.npm_cpu }} ${{ matrix.npm_libc && format('--libc={0}', matrix.npm_libc) || '' }}
+          npm ci --prefix vendor --ignore-scripts
       - run: npx vsce package --target ${{ matrix.target }} --out rn-lens-${{ matrix.target }}.vsix
       - uses: actions/upload-artifact@v4
         with:
