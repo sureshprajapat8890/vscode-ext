@@ -5,6 +5,14 @@
   "version": "0.0.1",
   "publisher": "rn-lens",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sureshprajapat8890/vscode-ext.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sureshprajapat8890/vscode-ext/issues"
+  },
+  "homepage": "https://github.com/sureshprajapat8890/vscode-ext#readme",
   "private": true,
   "engines": {
     "vscode": "^1.90.0",
