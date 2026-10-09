@@ -43,6 +43,9 @@ export interface PanelTarget {
 }
 
 export type SimulatedOS = 'ios' | 'android' | 'web';
+
+/** How to apply a bundle: re-mount everything, or re-run some modules and Fast Refresh. */
+export type ProtocolPlan = { kind: 'full'; reason: string } | { kind: 'hot'; reexecute: string[] };
 export type ConsoleLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 
 /** Extension → webview. */
@@ -58,8 +61,11 @@ export type HostMessage =
   | {
       type: 'bundle';
       id: number;
-      code: string;
-      css: string;
+      /** The project's own code (a CommonJS bundle requiring vendor modules by key). */
+      app: { code: string; css: string };
+      /** `code` is omitted when the webview already runs this vendor version. */
+      vendor: { version: string; code?: string; css: string };
+      plan: ProtocolPlan;
       buildMs: number;
       platform: SimulatedOS;
       mocked: ProtocolMock[];
@@ -97,6 +103,8 @@ export type WebviewMessage =
       message: string;
       stack: string | undefined;
       componentStack: string | undefined;
+      /** Blob URLs the app and vendor bundles were loaded from (to pick each frame's source map). */
+      bundleUrls: { app?: string; vendor?: string };
     }
   | { type: 'console'; level: ConsoleLevel; text: string }
   | { type: 'openSource'; file: string; line: number; column: number }
@@ -105,6 +113,8 @@ export type WebviewMessage =
   | { type: 'showOutput' }
   | { type: 'setPlatform'; platform: SimulatedOS }
   | { type: 'toggleLock' }
+  /** The webview lacks the vendor bundle a message refers to (e.g. after it reloaded). */
+  | { type: 'requestFullBundle' }
   | {
       type: '__test_snapshot_result';
       requestId: number;
@@ -123,6 +133,7 @@ const WEBVIEW_MESSAGE_TYPES = new Set<WebviewMessage['type']>([
   'selectVariant',
   'reload',
   'showOutput',
+  'requestFullBundle',
   'setPlatform',
   'toggleLock',
   '__test_snapshot_result',

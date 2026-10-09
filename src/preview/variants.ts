@@ -9,18 +9,30 @@ const PREVIEW_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js'];
 
 export interface VariantInfo {
   name: string;
-  /** `file`: from `<Name>.preview.*`; `props`: from the component's `export const previews`. */
-  kind: 'file' | 'props';
+  /**
+   * `file`: from `<Name>.preview.*`; `props`: from the component's `export const previews`;
+   * `story`: from the Storybook CSF file `<Name>.stories.*`.
+   */
+  kind: 'file' | 'props' | 'story';
+}
+
+function findColocated(componentFile: string, suffix: string): string | undefined {
+  const dir = path.dirname(componentFile);
+  const base = path.basename(componentFile, path.extname(componentFile));
+  if (base.endsWith('.preview') || base.endsWith('.stories')) return undefined;
+  return PREVIEW_EXTENSIONS.map((ext) => path.join(dir, `${base}${suffix}${ext}`)).find((f) =>
+    existsSync(f),
+  );
 }
 
 /** `Button.tsx` → the colocated `Button.preview.(tsx|ts|jsx|js)`, if one exists. */
 export function findVariantFile(componentFile: string): string | undefined {
-  const dir = path.dirname(componentFile);
-  const base = path.basename(componentFile, path.extname(componentFile));
-  if (base.endsWith('.preview')) return undefined;
-  return PREVIEW_EXTENSIONS.map((ext) => path.join(dir, `${base}.preview${ext}`)).find((f) =>
-    existsSync(f),
-  );
+  return findColocated(componentFile, '.preview');
+}
+
+/** `Button.tsx` → the colocated Storybook file `Button.stories.(tsx|ts|jsx|js)`, if one exists. */
+export function findStoriesFile(componentFile: string): string | undefined {
+  return findColocated(componentFile, '.stories');
 }
 
 export function isVariantFile(file: string): boolean {
@@ -116,21 +128,92 @@ export function listInlineVariants(source: string, exportName: string): string[]
   return exportName === primary ? entries.map(([key]) => key) : [];
 }
 
+function stringList(node: t.Node | null | undefined): string[] | undefined {
+  const value = unwrap(node);
+  if (value?.type === 'StringLiteral') return [value.value];
+  if (value?.type !== 'ArrayExpression') return undefined;
+  const items = value.elements.map((e) => (e?.type === 'StringLiteral' ? e.value : undefined));
+  return items.every((i) => i !== undefined) ? (items as string[]) : undefined;
+}
+
+/**
+ * Story names of a Storybook CSF file, in source order: its named exports, minus `__`-prefixed
+ * ones and those excluded by the default export's `includeStories` / `excludeStories` (string
+ * lists; regular expressions aren't evaluated).
+ */
+export function listStories(source: string): string[] {
+  let program: t.Program;
+  try {
+    program = parse(source, {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript'],
+      errorRecovery: true,
+    }).program;
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  const locals = new Map<string, t.Node | null | undefined>();
+  let meta: t.Node | null | undefined;
+  for (const statement of program.body) {
+    if (statement.type === 'VariableDeclaration') {
+      for (const d of statement.declarations) {
+        if (d.id.type === 'Identifier') locals.set(d.id.name, d.init);
+      }
+    }
+    if (statement.type === 'ExportDefaultDeclaration') {
+      const declaration = statement.declaration;
+      meta = declaration.type === 'Identifier' ? locals.get(declaration.name) : declaration;
+    }
+    if (statement.type !== 'ExportNamedDeclaration') continue;
+    const declaration = statement.declaration;
+    if (declaration?.type === 'VariableDeclaration') {
+      for (const d of declaration.declarations) {
+        if (d.id.type === 'Identifier') names.push(d.id.name);
+      }
+    } else if (declaration?.type === 'FunctionDeclaration' && declaration.id) {
+      names.push(declaration.id.name);
+    } else if (!declaration && !statement.source) {
+      for (const s of statement.specifiers) {
+        if (s.type !== 'ExportSpecifier') continue;
+        const exported = s.exported.type === 'Identifier' ? s.exported.name : s.exported.value;
+        if (exported !== 'default') names.push(exported);
+      }
+    }
+  }
+  const metaEntries = new Map(objectEntries(unwrap(meta)));
+  const include = stringList(metaEntries.get('includeStories'));
+  const exclude = stringList(metaEntries.get('excludeStories')) ?? [];
+  return names.filter(
+    (n) => !n.startsWith('__') && !exclude.includes(n) && (!include || include.includes(n)),
+  );
+}
+
 /**
  * All variants for a component: named exports of its `.preview` file first, then keys of its own
- * `previews` object (a name already provided by the `.preview` file wins).
+ * `previews` object, then stories of its Storybook file (an earlier source wins a name clash).
  */
 export async function listAllVariants(
   componentFile: string,
   exportName: string,
-): Promise<{ variantFile: string | undefined; variants: VariantInfo[] }> {
+): Promise<{
+  variantFile: string | undefined;
+  storiesFile: string | undefined;
+  variants: VariantInfo[];
+}> {
   const variantFile = findVariantFile(componentFile);
   const fromFile = variantFile ? await listVariants(variantFile) : [];
   const source = await readText(componentFile);
   const inline = source === undefined ? [] : listInlineVariants(source, exportName);
-  const variants: VariantInfo[] = fromFile.map((name) => ({ name, kind: 'file' }));
-  for (const name of inline) {
-    if (!fromFile.includes(name)) variants.push({ name, kind: 'props' });
-  }
-  return { variantFile, variants };
+  const storiesFile = findStoriesFile(componentFile);
+  const storiesSource = storiesFile ? await readText(storiesFile) : undefined;
+  const stories = storiesSource === undefined ? [] : listStories(storiesSource);
+  const variants: VariantInfo[] = [];
+  const add = (name: string, kind: VariantInfo['kind']): void => {
+    if (!variants.some((v) => v.name === name)) variants.push({ name, kind });
+  };
+  for (const name of fromFile) add(name, 'file');
+  for (const name of inline) add(name, 'props');
+  for (const name of stories) add(name, 'story');
+  return { variantFile, storiesFile, variants };
 }

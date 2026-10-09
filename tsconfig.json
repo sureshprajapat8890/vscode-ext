@@ -18,6 +18,12 @@
     "exactOptionalPropertyTypes": false,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "test/unit/**/*.ts", "test/integration/**/*.ts", "vitest.config.mts"],
+  "include": [
+    "src/**/*.ts",
+    "test/unit/**/*.ts",
+    "test/integration/**/*.ts",
+    "test/bench/**/*.ts",
+    "vitest.config.mts"
+  ],
   "exclude": ["src/mocks/**"]
 }

@@ -11,7 +11,7 @@ describe('generateEntry', () => {
       exportName: 'Primary',
     });
     const lines = src.split('\n');
-    expect(lines[0]).toBe(`import { ErrorBoundary } from 'rnlens:runtime';`);
+    expect(lines[0]).toBe(`import { ErrorBoundary, storyComponent } from 'rnlens:runtime';`);
     expect(src).toContain(`import * as Target from "C:\\\\app\\\\Button.tsx";`);
     expect(src).toContain(`const Component = Target["Primary"];`);
     expect(src).toContain(`const Shown = Component;`);
@@ -44,6 +44,19 @@ describe('generateEntry', () => {
     expect(src).toContain(`import Decorators from "/p/.rnlens/decorators.tsx";`);
     expect(src).toContain(`const Decorate = Decorators;`);
     expect(src).toContain('must default-export a component');
+  });
+
+  it('renders Storybook stories through the runtime story composer', () => {
+    const src = generateEntry({
+      kind: 'component',
+      file: '/p/Card.tsx',
+      exportName: 'Card',
+      variant: { kind: 'story', file: '/p/Card.stories.tsx', name: 'Loading' },
+    });
+    expect(src).toContain('import * as Variants from "/p/Card.stories.tsx";');
+    expect(src).toContain(
+      'const Shown = storyComponent(Variants, "Loading", Component, "/p/Card.stories.tsx");',
+    );
   });
 
   it('renders props variants from the component file previews object', () => {

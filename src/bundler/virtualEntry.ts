@@ -22,16 +22,21 @@ export function findDecorators(projectRoot: string, override?: string): string |
 
 const str = JSON.stringify;
 
+/** Applies a hot update (React Refresh) instead of mounting, when the shell says this run is one. */
+const HOT_UPDATE = 'globalThis.__RNLENS_HOT__ && globalThis.__RNLENS_HOT__.updating';
+const PERFORM_REFRESH = '  globalThis.__RNLENS_REFRESH__.perform();';
+
 function componentEntry(target: ComponentTarget, decoratorsFile: string | undefined): string[] {
   const file = str(target.file);
   const lines = [
-    `import { ErrorBoundary } from 'rnlens:runtime';`,
+    `import { ErrorBoundary, storyComponent } from 'rnlens:runtime';`,
     `import { createElement } from 'react';`,
     `import { AppRegistry } from 'react-native';`,
     `import * as Target from ${file};`,
   ];
   const variant = target.variant;
   const propsVariant = variant?.kind === 'props';
+  const storyVariant = variant?.kind === 'story';
   if (variant && !propsVariant) lines.push(`import * as Variants from ${str(variant.file)};`);
   if (decoratorsFile) lines.push(`import Decorators from ${str(decoratorsFile)};`);
 
@@ -54,6 +59,10 @@ function componentEntry(target: ComponentTarget, decoratorsFile: string | undefi
       `  throw new Error('RN Lens: the previews object in ' + ${file} + ' has no variant ' + ${str(str(variant.name))} + '. Pick another variant in the preview toolbar.');`,
       `}`,
       `const Shown = () => createElement(Component, variantProps);`,
+    );
+  } else if (variant && storyVariant) {
+    lines.push(
+      `const Shown = storyComponent(Variants, ${str(variant.name)}, Component, ${str(variant.file)});`,
     );
   } else if (variant) {
     lines.push(`const Shown = Variants[${str(variant.name)}];`);
@@ -79,8 +88,12 @@ function componentEntry(target: ComponentTarget, decoratorsFile: string | undefi
     `function RNLensPreviewRoot() {`,
     `  return createElement(ErrorBoundary, null, createElement(Decorate, null, createElement(Shown)));`,
     `}`,
-    `AppRegistry.registerComponent(${str(APP_KEY)}, () => RNLensPreviewRoot);`,
-    `AppRegistry.runApplication(${str(APP_KEY)}, { rootTag: globalThis.__RNLENS_ROOT__ });`,
+    `if (${HOT_UPDATE}) {`,
+    PERFORM_REFRESH,
+    `} else {`,
+    `  AppRegistry.registerComponent(${str(APP_KEY)}, () => RNLensPreviewRoot);`,
+    `  AppRegistry.runApplication(${str(APP_KEY)}, { rootTag: globalThis.__RNLENS_ROOT__ });`,
+    `}`,
   );
   return lines;
 }
@@ -105,6 +118,9 @@ function appEntry(target: AppTarget): string[] {
     lines.push(`import ${file};`);
   }
   lines.push(
+    `if (${HOT_UPDATE}) {`,
+    PERFORM_REFRESH,
+    `} else {`,
     `AppRegistry.setWrapperComponentProvider(() => ErrorBoundary);`,
     `if (mountedRootCount() === 0) {`,
     `  const keys = AppRegistry.getAppKeys();`,
@@ -112,6 +128,7 @@ function appEntry(target: AppTarget): string[] {
     `    throw new Error('RN Lens: ' + ${file} + " didn't register an app. Expected AppRegistry.registerComponent(...) or Expo's registerRootComponent(...); set rnLens.entry if your entry is elsewhere.");`,
     `  }`,
     `  AppRegistry.runApplication(keys[keys.length - 1], { rootTag: globalThis.__RNLENS_ROOT__ });`,
+    `}`,
     `}`,
   );
   return lines;
@@ -137,6 +154,8 @@ export function virtualEntryPlugin(
   projectRoot: string,
   runtimeDir: string,
   decoratorsOverride?: string,
+  /** Receives each generated entry (a changed entry can't be applied as a hot update). */
+  onEntry?: (source: string) => void,
 ): Plugin {
   return {
     name: 'rnlens-virtual-entry',
@@ -145,11 +164,14 @@ export function virtualEntryPlugin(
         path: 'entry',
         namespace: NAMESPACE,
       }));
-      build.onLoad({ filter: /.*/, namespace: NAMESPACE }, () => ({
-        contents: generateEntry(getTarget(), findDecorators(projectRoot, decoratorsOverride)),
-        loader: 'js',
-        resolveDir: projectRoot,
-      }));
+      build.onLoad({ filter: /.*/, namespace: NAMESPACE }, () => {
+        const contents = generateEntry(
+          getTarget(),
+          findDecorators(projectRoot, decoratorsOverride),
+        );
+        onEntry?.(contents);
+        return { contents, loader: 'js', resolveDir: projectRoot };
+      });
       build.onResolve({ filter: /^rnlens:runtime(\/[A-Za-z]+)?$/ }, async (args) => {
         const sub = args.path.slice('rnlens:runtime'.length) || '/index';
         const result = await build.resolve(`.${sub}`, { kind: args.kind, resolveDir: runtimeDir });

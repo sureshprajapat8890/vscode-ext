@@ -2,50 +2,43 @@
 
 ## Repository layout
 
+How the pieces fit together is described in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+
 ```
 rn-lens/
-├── package.json                 # extension manifest (contributes, activationEvents)
-├── tsconfig.json
-├── esbuild.extension.mjs        # builds the extension itself
+├── package.json                 # extension manifest (contributes, activationEvents, walkthrough)
+├── esbuild.extension.mjs        # builds the extension, the webview, and the test/bench bundles
 ├── src/
-│   ├── extension.ts             # activate/deactivate, command registration
-│   ├── project/
-│   │   ├── detectProject.ts     # finds RN/Expo root, reads package.json, tsconfig, babel aliases
-│   │   └── config.ts            # settings + rnlens.config.js (workspace-trust gated)
+│   ├── extension.ts             # activate/deactivate, command registration, test API
+│   ├── project/                 # project + app entry detection, Babel aliases, rnlens.config.js
 │   ├── bundler/
-│   │   ├── BundlerService.ts    # esbuild context lifecycle, rebuild queue, caching
-│   │   ├── virtualEntry.ts      # generates preview entry module
-│   │   └── plugins/
-│   │       ├── rnAlias.ts
-│   │       ├── platformExtensions.ts
-│   │       ├── flowStrip.ts
-│   │       ├── assets.ts
-│   │       ├── mockRegistry.ts
-│   │       └── unsavedBuffers.ts
+│   │   ├── BundlerService.ts    # app + vendor esbuild contexts, shared by panels, build queue
+│   │   ├── buildOptions.ts      # the two builds' options and plugin order
+│   │   ├── virtualEntry.ts      # generates the preview entry module
+│   │   ├── refresh/             # Fast Refresh transform and hot-update planning
+│   │   └── plugins/             # externalize, vendorEntry, projectSource, mockRegistry, aliases,
+│   │                            # platformExtensions, rnAlias, flowStrip, assets, expoRouter, …
 │   ├── mocks/                   # built-in native module mocks
 │   ├── preview/
-│   │   ├── PreviewPanelManager.ts
-│   │   ├── protocol.ts          # typed message definitions shared with webview
+│   │   ├── PreviewPanelManager.ts  # all panels; routes commands and workspace events
+│   │   ├── PreviewPanel.ts      # one panel: builds, delivers, maps errors, follows the editor
+│   │   ├── protocol.ts          # typed message definitions shared with the webview
+│   │   ├── variants.ts          # .preview files, previews objects, Storybook stories
 │   │   └── html.ts              # webview HTML + CSP
-│   ├── codelens/ComponentCodeLensProvider.ts
-│   ├── diagnostics/sourceMaps.ts
+│   ├── codelens/                # component detection and the ▶ Preview CodeLens
+│   ├── diagnostics/             # source maps, mock diagnostics + "Create mock for …"
 │   └── util/
-├── webview/                     # webview shell (toolbar, device frame, runtime)
-│   ├── main.tsx
-│   ├── runtime/
-│   │   ├── errorBoundary.tsx
-│   │   ├── consoleBridge.ts
-│   │   └── platformPatch.ts
-│   ├── devices.ts
-│   └── styles.css
-├── vendor/                      # pinned react, react-dom, react-native-web fallbacks
+├── webview/                     # webview shell: toolbar, device frames, overlay, console bridge
+│   └── runtime/                 # bundled into every preview: react-native wrapper, Platform,
+│                                # React Refresh setup, auto-mocks, RN API shims, stories
+├── media/walkthrough/           # Getting Started walkthrough pages
+├── vendor/                      # pinned react, react-dom, react-native-web, react-refresh
 ├── test/
-│   ├── unit/                    # vitest
-│   ├── integration/             # @vscode/test-electron
-│   └── fixtures/
-│       ├── expo-app/
-│       └── bare-rn-app/
-└── docs/
+│   ├── unit/                    # vitest (incl. real esbuild builds of fixtures)
+│   ├── integration/             # @vscode/test-electron + mocha
+│   ├── bench/                   # npm run bench (PRD §7 targets)
+│   └── fixtures/                # expo-app, bare-rn-app, router-app
+└── docs/                        # ARCHITECTURE, DECISIONS, KNOWN_DIFFERENCES, WRITING_MOCKS
 ```
 
 ## Setup
@@ -66,14 +59,15 @@ Press **F5** in VS Code to launch an Extension Development Host with `test/fixtu
 | `npm run watch` | Rebuild on change |
 | `npm run lint` | ESLint + Prettier check |
 | `npm test` | Unit tests (vitest) |
-| `npm run test:integration` | VS Code integration tests |
+| `npm run test:integration` | VS Code integration tests (`VSCODE_TEST_VERSION=1.90.0` for the minimum engine; `MOCHA_GREP` to filter) |
+| `npm run bench` | Production build, then measures activation, cold build, warm rebuild p90 and memory in VS Code and prints the PRD §7 table (exits non-zero if a target is missed) |
 | `npm run package` | Produce platform-specific `.vsix` files via `vsce package --target <platform>` |
 
 ## Adding a built-in mock
 
 1. Create `src/mocks/<package-name>.ts(x)` exporting the same public API shape as the real package (types optional but encouraged).
 2. Register it in `src/mocks/index.ts`.
-3. Add a fixture usage in `test/fixtures/expo-app/mocks-demo/` and a test asserting it renders.
+3. Import it from a fixture (e.g. `test/unit/fixtures/hello-project/components/Mocked.tsx`, asserted in `test/unit/bundler/bundle.test.ts`), and for anything visual add a demo to `test/fixtures/expo-app/components/reference/` that `test/integration/suite/reference.test.ts` renders.
 
 ## Coding standards
 
@@ -87,4 +81,5 @@ Press **F5** in VS Code to launch an Extension Development Host with `test/fixtu
 
 1. Update `CHANGELOG.md`.
 2. `npm version <patch|minor|major>`.
-3. CI builds per-platform VSIX (win32-x64, win32-arm64, linux-x64, linux-arm64, darwin-x64, darwin-arm64, alpine-x64, web is not supported) and publishes to Marketplace and Open VSX.
+3. CI builds a VSIX per platform (win32-x64, win32-arm64, linux-x64, linux-arm64, alpine-x64, darwin-x64, darwin-arm64; web is not supported) and uploads them as workflow artifacts.
+4. Publish those VSIX files to the Marketplace and Open VSX (`vsce publish --packagePath …`, `ovsx publish …`). Publishing isn't automated yet.

@@ -249,3 +249,72 @@ The toolbar's iOS / Android / Web selector changes the open preview only. It's p
 - **The navigation test** presses on-screen elements through a `__test_press` webview hook: it clicks the innermost element whose text matches, and react-native-web's `Pressable` handles `click`.
 - **The follow test** opens the component in an editor before previewing, as in real use. With no editor open, the preview lands in the first group, and VS Code replaces it when a file opens in that group (documented in the README).
 - **Debug output:** `api.testing.recentLog()` exposes the last 300 output-channel lines, and failure messages include them.
+
+## Phase 4
+
+### D-46. Fast Refresh with two bundles (refines BUILD_PROMPT's "wrap modules via an onLoad transform")
+
+A wrapped module alone isn't enough: Fast Refresh needs the *same* React instance and the unchanged modules' *same* exports across updates. Rebuilding one IIFE that contains React would give every update a fresh React. So each preview has two esbuild contexts:
+
+- **The app bundle** (CommonJS, metafile) holds the project's own files. Everything else is an external `require("<namespace>:<path>")`.
+- **The vendor bundle** (IIFE) registers a lazy factory for each such key on `globalThis.__RNLENS_REQUIRE__`. It's rebuilt only when the set of keys grows.
+
+`externalizePlugin` resolves every import with all of RN Lens's rules first (mocks, aliases, platform files), so splitting the bundles changes nothing about what gets resolved. Using a dedicated namespace was necessary because esbuild rejects non-absolute external paths in the `file` namespace.
+
+### D-47. Project modules are transformed to CommonJS one by one
+
+`projectSource.ts` runs `analyzeForRefresh` (Babel) then `esbuild.transform` (format `cjs`, inline source map) on each project file, caching the result by content hash. In the bundled output each file then becomes its own `__commonJS` module whose body can return early with cached exports. ESM scope hoisting would merge modules and make that impossible.
+
+The cost is one `transform` per changed file. It's cheaper than before, because unchanged files are served from the cache. `tsconfig.json` is passed as `tsconfigRaw`, so `jsxImportSource` and decorator settings set there still apply. `transform` doesn't follow `extends`, so settings inherited from a base config (e.g. `expo/tsconfig.base`) aren't seen; JSX is always compiled with the automatic runtime.
+
+### D-48. Update plans are computed per webview
+
+`BundlerService` returns the module records (hash, "exports only components") and the reverse import graph. Each `PreviewPanel` plans against the bundle *its* webview last received (`planDelivery`). If plans were computed per build, two failure cases would hide changes from a webview:
+
+- a build that was superseded before delivery;
+- a build delivered to another panel sharing the context.
+
+The rules follow React Native's Fast Refresh:
+
+- **Boundaries:** changed modules that export only components are handled by React Refresh alone.
+- **Other changed modules** re-run their importers transitively.
+- **Full reload** when a change reaches a non-project module (the entry), or when the context, vendor or entry source changed.
+
+### D-49. Reused modules still require their imports
+
+Bundled CommonJS modules run only when an importer requires them. If an unchanged importer (e.g. the navigator) returned its cached exports immediately, a changed module below it (e.g. a screen) would never run, and the preview wouldn't update. So the line-1 guard `require`s the module's top-level imports before returning. These are exactly the requires esbuild's CJS transform emits; nested, lazy requires are left alone. This was found by `npm run bench` and is covered by the "hot-updates a screen of the app" integration test.
+
+### D-50. Explicit actions always remount
+
+Re-opening a preview, **Reload** and **Clear Cache** force a full reload, even when nothing changed. Otherwise "Preview App" on an app already open on its Settings screen would leave it there. Reload restarting the contexts isn't enough on its own either, because the rebuilt vendor bundle is byte-identical and the plan would be a no-op hot update.
+
+### D-51. Multiple panels share contexts by ownership (PRD R-11)
+
+`PreviewPanelManager` owns `PreviewPanel`s:
+
+- **Routing:** commands act on the most recently focused panel; saves, typing, editor switches and settings reach all panels.
+- **Ownership:** `BundlerService.build(key, owner)` registers each panel as an owner of the `bundleKeyId` contexts. `release(key, owner)` disposes them when the last owner leaves. `reset(key)` (Reload) keeps the owners.
+- **Coalescing:** queued builds merge per *target*, not per context. Two panels showing different variants of one component share contexts but never receive each other's builds.
+
+"Open Preview in New Panel" from a focused preview (where there's no active editor) duplicates that preview. That's the iPhone + Pixel case.
+
+### D-52. Storybook CSF3 stories as variants (PRD P-6)
+
+A colocated `<Name>.stories.*` file is parsed with Babel; its named exports, minus `__` names and minus `includeStories` / `excludeStories` string lists, become variants of kind `story`. In the preview, `storyComponent` (in `webview/runtime`) composes a story the way Storybook does:
+
+- **Args:** meta `args` then story `args`.
+- **Render:** the story's `render`, else the meta's, else `<component {...args} />`. CSF2 function stories work.
+- **Decorators:** story decorators inside meta decorators.
+
+`loaders` and `play` don't run, and Storybook's global `preview.tsx` isn't read; `.rnlens/decorators` plays that role. Stories files export non-components, so editing one reloads the preview.
+
+### D-53. Benchmark methodology (`npm run bench`)
+
+The benchmark runs inside real VS Code (the integration harness), on a production build, against `test/fixtures/expo-app`:
+
+- **Activation:** an esbuild banner stamps `performance.now()` when `dist/extension.js` starts evaluating, so activation time includes module loading. The timer stops at the end of `activate()`.
+- **Cold:** after **Clear Cache**, from the command to the rendered preview.
+- **Warm:** 20 edits of a screen, timed from save to the rendered change.
+- **Memory:** extension-host RSS growth from before the first preview to the peak. The esbuild service is a separate process and isn't included.
+
+Timings are judged end to end, which is stricter than build time alone. The fixture app has ~590 modules, about twice the PRD's "typical ~300".

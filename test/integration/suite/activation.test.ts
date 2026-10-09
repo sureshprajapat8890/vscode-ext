@@ -31,6 +31,7 @@ describe('activation', () => {
     const contributed = commands.map((c) => c.command);
     for (const id of [
       'rnLens.openPreview',
+      'rnLens.openPreviewToSide',
       'rnLens.previewApp',
       'rnLens.reload',
       'rnLens.toggleLock',

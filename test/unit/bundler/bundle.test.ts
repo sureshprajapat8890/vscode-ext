@@ -1,19 +1,15 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import * as esbuild from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { defaultLoadStripper } from '../../../src/bundler/BundlerService';
 import {
   assetCacheDir,
-  createBuildOptions,
   flowCacheDir,
   type ExtensionPaths,
 } from '../../../src/bundler/buildOptions';
-import { createFlowStripMemory } from '../../../src/bundler/plugins/flowStrip';
-import { mockRegistryPlugin } from '../../../src/bundler/plugins/mockRegistry';
 import { resolveRuntimeDeps, type RuntimeDeps } from '../../../src/bundler/runtimeDeps';
 import type { BundleKey, ComponentTarget, PreviewTarget } from '../../../src/bundler/types';
+import { buildPreview, extensionPaths } from './previewBuild';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const projectRoot = path.join(__dirname, '../fixtures/hello-project');
@@ -23,12 +19,7 @@ let paths: ExtensionPaths;
 let deps: RuntimeDeps;
 
 beforeAll(async () => {
-  paths = {
-    vendorDir: path.join(repoRoot, 'vendor'),
-    runtimeDir: path.join(repoRoot, 'webview', 'runtime'),
-    mocksDir: path.join(repoRoot, 'src', 'mocks'),
-    cacheDir: mkdtempSync(path.join(os.tmpdir(), 'rnlens-test-')),
-  };
+  paths = extensionPaths(mkdtempSync(path.join(os.tmpdir(), 'rnlens-test-')));
   deps = await resolveRuntimeDeps(projectRoot, paths.vendorDir);
 });
 
@@ -44,30 +35,8 @@ function target(
   return { kind: 'component', file: path.join(components, file), exportName, variant };
 }
 
-async function bundle(
-  t: PreviewTarget,
-  platform: BundleKey['platform'] = 'ios',
-  root = projectRoot,
-) {
-  const mocks = mockRegistryPlugin({
-    projectRoot: root,
-    mocksDir: paths.mocksDir,
-    runtimeDir: paths.runtimeDir,
-  });
-  const options = createBuildOptions({
-    key: { projectRoot: root, platform, target: t },
-    deps: root === projectRoot ? deps : await resolveRuntimeDeps(root, paths.vendorDir),
-    paths,
-    getTarget: () => t,
-    mockPlugin: mocks.plugin,
-    sourcemap: true,
-    flowMemory: createFlowStripMemory(),
-    loadStripper: defaultLoadStripper,
-  });
-  const result = await esbuild.build({ ...options, metafile: true });
-  const js = result.outputFiles.find((f) => f.path.endsWith('.js'))?.text ?? '';
-  const files = Object.keys(result.metafile.inputs).map((p) => p.replace(/\\/g, '/'));
-  return { result, js, files, mocked: mocks.used() };
+function bundle(t: PreviewTarget, platform: BundleKey['platform'] = 'ios', root = projectRoot) {
+  return buildPreview({ projectRoot: root, target: t, platform, paths });
 }
 
 describe('preview bundle (real esbuild, vendor fallback)', () => {
@@ -76,16 +45,45 @@ describe('preview bundle (real esbuild, vendor fallback)', () => {
   });
 
   it('routes react-native through the RN Lens wrapper to react-native-web', async () => {
-    const { js, files, result } = await bundle(target('Hello.tsx', 'default'));
+    const { js, appJs, files } = await bundle(target('Hello.tsx', 'default'));
     expect(files.some((f) => f.endsWith('webview/runtime/reactNative.ts'))).toBe(true);
     expect(files.some((f) => f.endsWith('webview/runtime/index.ts'))).toBe(true);
     expect(files.some((f) => f.includes('react-native-web/dist/'))).toBe(true);
     expect(files.some((f) => f.includes('/node_modules/react-native/'))).toBe(false);
     expect(js).toContain('"Hello"');
     expect(js).toContain('globalThis.__RNLENS_UNMOUNT__');
-    expect(js.startsWith('var process = globalThis.process')).toBe(true);
-    const map = result.outputFiles.find((f) => f.path.endsWith('.js.map'))?.text ?? '';
-    expect(map).toContain('Hello.tsx');
+    expect(appJs.startsWith('var process = globalThis.process')).toBe(true);
+  });
+
+  it('splits the project into the app bundle and everything else into the vendor bundle', async () => {
+    const { appJs, vendorJs, appFiles, vendorKeys, modules } = await bundle(
+      target('Hello.tsx', 'default'),
+    );
+    expect(appFiles.filter((f) => !f.startsWith('<define:')).sort()).toEqual([
+      'components/Hello.tsx',
+      'rnlens-entry:entry',
+    ]);
+    // The app requires vendor modules by key; the vendor bundle registers them.
+    const keys = [...vendorKeys.keys()];
+    expect(
+      keys.some((k) => k.endsWith('webview/runtime/reactNative.ts'.split('/').join(path.sep))),
+    ).toBe(true);
+    for (const key of keys) {
+      expect(appJs).toContain(`require(${JSON.stringify(key)})`);
+      expect(vendorJs).toContain(`modules[${JSON.stringify(key)}]`);
+    }
+    expect(vendorJs).toContain('globalThis.__RNLENS_REQUIRE__ = ');
+    expect(vendorJs).toContain('injectIntoGlobalHook');
+    // Project modules are hot-reloadable and registered with React Refresh.
+    const hello = path.join(components, 'Hello.tsx');
+    expect(modules.get(hello)).toMatchObject({ isBoundary: true });
+    // (esbuild may rename the CommonJS `module` parameter, e.g. to `module2`.)
+    expect(appJs).toMatch(
+      /__rnlensHot\.reuse\(module\d*, "[^"]+Hello\.tsx"\)\)\s*\{[^}]*require\([^}]*return;\s*\}/,
+    );
+    expect(appJs).toContain(
+      `__rnlensRefresh.register(__RNLens$default, ${JSON.stringify(`${hello}#__RNLens$default`)})`,
+    );
   });
 
   it('contains exactly one copy of react and react-dom', async () => {
@@ -188,11 +186,11 @@ describe('preview bundle (real esbuild, vendor fallback)', () => {
 
   it('renders a variant from the colocated .preview file', async () => {
     const variantFile = path.join(components, 'Button.preview.tsx');
-    const { js, files } = await bundle(
+    const { js, appFiles } = await bundle(
       target('Button.tsx', 'Button', { file: variantFile, name: 'Disabled' }),
     );
-    expect(files.some((f) => f.endsWith('components/Button.preview.tsx'))).toBe(true);
-    expect(js).toMatch(/var Shown = Disabled;|const Shown = Disabled;/);
+    expect(appFiles).toContain('components/Button.preview.tsx');
+    expect(js).toMatch(/Shown = \w+(?:\.Disabled|\["Disabled"\]);/);
     expect(js).toContain('title: "Disabled"');
   });
 

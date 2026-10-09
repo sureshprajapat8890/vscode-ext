@@ -1,4 +1,5 @@
-// Builds the extension host and webview bundles (or, with --tests, the integration test bundles).
+// Builds the extension host and webview bundles (or, with --tests / --bench, the integration test
+// or benchmark bundles).
 import * as esbuild from 'esbuild';
 import { cpSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -7,6 +8,7 @@ const args = new Set(process.argv.slice(2));
 const production = args.has('--production');
 const watch = args.has('--watch');
 const tests = args.has('--tests');
+const bench = args.has('--bench');
 
 /** @type {import('esbuild').BuildOptions} */
 const extensionOptions = {
@@ -19,6 +21,8 @@ const extensionOptions = {
   // Loaded lazily at runtime from node_modules: esbuild ships native binaries, and
   // flow-remove-types pulls in a multi-megabyte parser only needed for Flow-typed packages.
   external: ['vscode', 'esbuild', 'flow-remove-types'],
+  // Marks when VS Code starts evaluating the bundle, so activation time includes module loading.
+  banner: { js: 'globalThis.__RNLENS_LOAD_START__ = performance.now();' },
   sourcemap: !production,
   minify: production,
   logLevel: 'info',
@@ -57,7 +61,15 @@ const testOptions = {
   logLevel: 'info',
 };
 
-const builds = tests ? [testOptions] : [extensionOptions, webviewOptions];
+/** @type {import('esbuild').BuildOptions} */
+const benchOptions = {
+  ...testOptions,
+  entryPoints: ['test/bench/runBench.ts', 'test/bench/suite.ts'],
+  outdir: 'out/test/bench',
+  outbase: 'test/bench',
+};
+
+const builds = tests ? [testOptions] : bench ? [benchOptions] : [extensionOptions, webviewOptions];
 
 /**
  * Preview runtime and built-in mocks are bundled into each preview by the user's esbuild context,
@@ -72,7 +84,7 @@ function copyPreviewSources() {
   });
 }
 
-if (!tests) {
+if (!tests && !bench) {
   // Start from an empty dist/ so nothing stale (e.g. a dev build's source map) gets packaged.
   rmSync('dist', { recursive: true, force: true });
   copyPreviewSources();

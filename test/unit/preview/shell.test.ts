@@ -2,10 +2,12 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isPanelTarget } from '../../../src/preview/protocol';
 import {
+  findStoriesFile,
   findVariantFile,
   isVariantFile,
   listAllVariants,
   listInlineVariants,
+  listStories,
   listVariants,
 } from '../../../src/preview/variants';
 import { formatArgs, serialize } from '../../../webview/consoleBridge';
@@ -56,12 +58,51 @@ describe('inline previews objects', () => {
   it('merges .preview file variants with inline ones (the file wins on name clashes)', async () => {
     expect(await listAllVariants(path.join(components, 'Button.tsx'), 'Button')).toEqual({
       variantFile: path.join(components, 'Button.preview.tsx'),
+      storiesFile: undefined,
       variants: [
         { name: 'Primary', kind: 'file' },
         { name: 'Disabled', kind: 'file' },
         { name: 'Big', kind: 'props' },
       ],
     });
+  });
+});
+
+describe('Storybook stories', () => {
+  const expo = path.join(__dirname, '../../fixtures/expo-app/components');
+
+  it('lists CSF stories in order, honouring excludeStories, and adds them after other variants', async () => {
+    expect(findStoriesFile(path.join(expo, 'Greeting.stories.tsx'))).toBeUndefined();
+    expect(await listAllVariants(path.join(expo, 'Greeting.tsx'), 'Greeting')).toEqual({
+      variantFile: path.join(expo, 'Greeting.preview.tsx'),
+      storiesFile: path.join(expo, 'Greeting.stories.tsx'),
+      variants: [
+        { name: 'Formal', kind: 'file' },
+        { name: 'Casual', kind: 'file' },
+        { name: 'Named', kind: 'props' },
+        { name: 'Basic', kind: 'story' },
+        { name: 'Linus', kind: 'story' },
+        { name: 'Pair', kind: 'story' },
+        { name: 'Legacy', kind: 'story' },
+      ],
+    });
+  });
+
+  it('reads export lists, function stories, includeStories, and skips __ exports', () => {
+    const source = [
+      `const meta = { includeStories: ['A', 'C', '__D'] };`,
+      `export default meta;`,
+      `const A = {}; const B = {};`,
+      `export function C() { return null; }`,
+      `export const __D = {};`,
+      `export { A, B };`,
+      `export { X } from './x';`,
+    ].join('\n');
+    expect(listStories(source)).toEqual(['C', 'A']);
+    expect(
+      listStories(`export default { excludeStories: 'B' }; export const A = {}, B = {};`),
+    ).toEqual(['A']);
+    expect(listStories('export const = ;')).toEqual([]);
   });
 });
 

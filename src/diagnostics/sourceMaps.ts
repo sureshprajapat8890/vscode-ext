@@ -15,7 +15,7 @@ export interface StackFrame {
   raw: string;
 }
 
-interface RawFrame {
+export interface RawFrame {
   functionName: string | undefined;
   url: string;
   line: number;
@@ -41,6 +41,31 @@ export function parseStack(stack: string): RawFrame[] {
     });
   }
   return frames;
+}
+
+function unmappedFrame(frame: RawFrame): StackFrame {
+  return {
+    functionName: frame.functionName,
+    file: undefined,
+    line: undefined,
+    column: undefined,
+    userCode: false,
+    raw: frame.raw,
+  };
+}
+
+/**
+ * Maps a stack whose frames come from several bundles (the app and vendor bundles), choosing each
+ * frame's source map by the URL the frame's code was loaded from.
+ */
+export function mapStackAcross(
+  stack: string | undefined | null,
+  maps: ReadonlyMap<string, BundleSourceMap>,
+): StackFrame[] {
+  if (!stack) return [];
+  return parseStack(stack).map(
+    (frame) => maps.get(frame.url)?.mapFrame(frame) ?? unmappedFrame(frame),
+  );
 }
 
 const isInside = (parent: string, child: string): boolean => {
@@ -69,15 +94,8 @@ export class BundleSourceMap {
     return stack ? parseStack(stack).map((f) => this.mapFrame(f)) : [];
   }
 
-  private mapFrame(frame: RawFrame): StackFrame {
-    const unmapped: StackFrame = {
-      functionName: frame.functionName,
-      file: undefined,
-      line: undefined,
-      column: undefined,
-      userCode: false,
-      raw: frame.raw,
-    };
+  mapFrame(frame: RawFrame): StackFrame {
+    const unmapped = unmappedFrame(frame);
     if (!frame.url.startsWith('blob:')) return unmapped;
 
     const pos = this.consumer.originalPositionFor({ line: frame.line, column: frame.column - 1 });

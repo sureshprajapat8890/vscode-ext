@@ -10,3 +10,4 @@ import { unmountAll } from './reactDomClient';
 
 export { ErrorBoundary } from './errorBoundary';
 export { mountedRootCount } from './reactDomClient';
+export { storyComponent } from './storybook';

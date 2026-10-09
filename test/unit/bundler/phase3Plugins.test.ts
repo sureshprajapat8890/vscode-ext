@@ -4,23 +4,19 @@ import path from 'node:path';
 import * as esbuild from 'esbuild';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { missingPackages } from '../../../src/bundler/BundlerService';
-import { createBuildOptions } from '../../../src/bundler/buildOptions';
-import { defaultLoadStripper } from '../../../src/bundler/BundlerService';
 import { aliasesPlugin } from '../../../src/bundler/plugins/aliases';
 import {
   expoRouterDefines,
   listRouteFiles,
   routerContextSource,
 } from '../../../src/bundler/plugins/expoRouter';
-import { createFlowStripMemory } from '../../../src/bundler/plugins/flowStrip';
 import { METRO_DEV_CLIENT_FILES } from '../../../src/bundler/plugins/metroDevClients';
-import { mockRegistryPlugin } from '../../../src/bundler/plugins/mockRegistry';
 import {
   projectSourceFilter,
-  unsavedBuffersPlugin,
-} from '../../../src/bundler/plugins/unsavedBuffers';
-import { resolveRuntimeDeps } from '../../../src/bundler/runtimeDeps';
+  projectSourcePlugin,
+} from '../../../src/bundler/plugins/projectSource';
 import { loadProjectConfig } from '../../../src/project/config';
+import { buildPreview, extensionPaths } from './previewBuild';
 import {
   MockDiagnostics,
   findSpecifierRange,
@@ -28,7 +24,6 @@ import {
 } from '../../../src/diagnostics/mockDiagnostics';
 import { Diagnostic, Range, Uri, diagnosticsState } from '../vscodeMock';
 
-const repoRoot = path.resolve(__dirname, '../../..');
 const fixtures = path.join(__dirname, '../fixtures');
 const aliasProject = path.join(fixtures, 'alias-project');
 const hello = path.join(fixtures, 'hello-project');
@@ -72,32 +67,9 @@ describe('aliases (real esbuild)', () => {
       file: path.join(aliasProject, 'src', 'Aliased.tsx'),
       exportName: 'Aliased',
     };
-    const paths = {
-      vendorDir: path.join(repoRoot, 'vendor'),
-      runtimeDir: path.join(repoRoot, 'webview', 'runtime'),
-      mocksDir: path.join(repoRoot, 'src', 'mocks'),
-      cacheDir,
-    };
-    const build = async (platform: 'ios' | 'android') => {
-      const result = await esbuild.build(
-        createBuildOptions({
-          key: { projectRoot: aliasProject, platform, target },
-          deps: await resolveRuntimeDeps(aliasProject, paths.vendorDir),
-          paths,
-          config,
-          getTarget: () => target,
-          mockPlugin: mockRegistryPlugin({
-            projectRoot: aliasProject,
-            mocksDir: paths.mocksDir,
-            runtimeDir: paths.runtimeDir,
-          }).plugin,
-          sourcemap: false,
-          flowMemory: createFlowStripMemory(),
-          loadStripper: defaultLoadStripper,
-        }),
-      );
-      return result.outputFiles.find((f) => f.path.endsWith('.js'))?.text ?? '';
-    };
+    const paths = extensionPaths(cacheDir);
+    const build = async (platform: 'ios' | 'android') =>
+      (await buildPreview({ projectRoot: aliasProject, target, platform, paths, config })).appJs;
     const ios = await build('ios');
     expect(ios).toContain('Button = "ios button"');
     expect(ios).toContain('s.toUpperCase()');
@@ -122,25 +94,68 @@ describe('unsaved buffers', () => {
     expect(filter.test(path.join(hello, 'components', 'Hello.tsx'))).toBe(true);
     expect(filter.test(path.join(hello, 'node_modules', 'flow-lib', 'index.js'))).toBe(false);
     expect(filter.test(path.join(hello, 'components', 'img', 'dot.png'))).toBe(false);
+    // Source files directly in the project root, but not other root files.
+    const expo = path.join(fixtures, '../../fixtures/expo-app');
+    const rootFiles = projectSourceFilter(expo) as RegExp;
+    expect(rootFiles.test(path.join(expo, 'App.tsx'))).toBe(true);
+    expect(rootFiles.test(path.join(expo, 'index.ts'))).toBe(true);
+    expect(rootFiles.test(path.join(expo, 'app.json'))).toBe(false);
+    expect(rootFiles.test(path.join(expo, 'App.tsx.bak'))).toBe(false);
     expect(projectSourceFilter(path.join(hello, 'missing'))).toBeUndefined();
   });
 
-  it('serves unsaved editor contents instead of disk contents', async () => {
+  it('serves unsaved contents, transforms once per content, records modules, reports errors', async () => {
     const file = path.join(hello, 'components', 'label.ts');
     const readUnsaved = vi.fn((f: string) =>
       path.normalize(f) === path.normalize(file) ? `export const label = 'unsaved';` : undefined,
     );
-    const result = await esbuild.build({
-      entryPoints: [file, path.join(hello, 'components', 'label.ios.ts')],
-      bundle: true,
-      write: false,
-      outdir: path.join(cacheDir, 'out'),
-      plugins: [unsavedBuffersPlugin(hello, readUnsaved)],
-    });
-    const texts = result.outputFiles.map((f) => f.text).join('\n');
+    const transform = vi.fn((source: string, options: esbuild.TransformOptions) =>
+      esbuild.transform(source, options),
+    );
+    const cache = new Map();
+    const modules = new Map<string, unknown>();
+    const build = () =>
+      esbuild.build({
+        entryPoints: [file, path.join(hello, 'components', 'label.ios.ts')],
+        bundle: true,
+        write: false,
+        outdir: path.join(cacheDir, 'out'),
+        plugins: [
+          projectSourcePlugin({
+            projectRoot: hello,
+            transform,
+            readUnsaved,
+            cache,
+            onModule: (f, record) => modules.set(f, record),
+          }),
+        ],
+      });
+    const texts = (await build()).outputFiles.map((f) => f.text).join('\n');
     expect(texts).toContain('"unsaved"');
     expect(texts).toContain('"ios"');
     expect(readUnsaved).toHaveBeenCalledTimes(2);
+    expect(modules.get(file)).toMatchObject({ isBoundary: false });
+    await build();
+    expect(transform).toHaveBeenCalledTimes(2); // unchanged files aren't transformed again
+
+    await expect(
+      esbuild.build({
+        entryPoints: [path.join(hello, 'components', 'Broken.tsx')],
+        bundle: true,
+        write: false,
+        logLevel: 'silent',
+        plugins: [
+          projectSourcePlugin({
+            projectRoot: hello,
+            transform,
+            cache: new Map(),
+            onModule: () => undefined,
+          }),
+        ],
+      }),
+    ).rejects.toMatchObject({
+      errors: [expect.objectContaining({ location: expect.objectContaining({ line: 3 }) })],
+    });
   });
 });
 

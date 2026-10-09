@@ -2,16 +2,22 @@ import { getHost, type PreviewPlatform } from './host';
 
 type PlatformSpec<T> = { [K in PreviewPlatform | 'native' | 'default']?: T };
 
-const os: PreviewPlatform = getHost().env.platform;
+/** Read on every access: the vendor bundle outlives platform switches. */
+const os = (): PreviewPlatform => getHost().env.platform;
 
 /**
- * `Platform` as seen by the previewed code: it reports the simulated OS (react-native-web's own
- * internals keep seeing `web`). `select` follows React Native's precedence: OS, then `native`
- * (except on web), then `default`.
+ * `Platform` as seen by the project's own code: it reports the simulated OS (react-native-web's
+ * internals, and libraries, keep seeing `web`). `select` follows React Native's precedence: OS,
+ * then `native` (except on web), then `default`.
  */
 export const Platform = {
-  OS: os,
-  Version: os === 'ios' ? '17.0' : os === 'android' ? 34 : '0.0.0',
+  get OS(): PreviewPlatform {
+    return os();
+  },
+  get Version(): string | number {
+    const current = os();
+    return current === 'ios' ? '17.0' : current === 'android' ? 34 : '0.0.0';
+  },
   isPad: false,
   isTV: false,
   isVision: false,
@@ -21,8 +27,9 @@ export const Platform = {
     isTesting: false,
   },
   select<T>(spec: PlatformSpec<T>): T | undefined {
-    if (os in spec) return spec[os];
-    if (os !== 'web' && 'native' in spec) return spec.native;
+    const current = os();
+    if (current in spec) return spec[current];
+    if (current !== 'web' && 'native' in spec) return spec.native;
     return spec.default;
   },
 };

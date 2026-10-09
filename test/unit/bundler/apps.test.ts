@@ -1,24 +1,14 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import * as esbuild from 'esbuild';
 import { afterAll, describe, expect, it } from 'vitest';
-import { defaultLoadStripper } from '../../../src/bundler/BundlerService';
-import { createBuildOptions } from '../../../src/bundler/buildOptions';
-import { createFlowStripMemory } from '../../../src/bundler/plugins/flowStrip';
-import { mockRegistryPlugin } from '../../../src/bundler/plugins/mockRegistry';
-import { resolveRuntimeDeps } from '../../../src/bundler/runtimeDeps';
 import type { AppTarget } from '../../../src/bundler/types';
 import { detectAppEntry } from '../../../src/project/appEntry';
+import { buildPreview, extensionPaths } from './previewBuild';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const fixtures = path.join(repoRoot, 'test', 'fixtures');
-const paths = {
-  vendorDir: path.join(repoRoot, 'vendor'),
-  runtimeDir: path.join(repoRoot, 'webview', 'runtime'),
-  mocksDir: path.join(repoRoot, 'src', 'mocks'),
-  cacheDir: mkdtempSync(path.join(os.tmpdir(), 'rnlens-apps-')),
-};
+const paths = extensionPaths(mkdtempSync(path.join(os.tmpdir(), 'rnlens-apps-')));
 afterAll(() => rmSync(paths.cacheDir, { recursive: true, force: true }));
 
 async function bundleApp(projectRoot: string, platform: 'ios' | 'android' = 'ios') {
@@ -30,30 +20,7 @@ async function bundleApp(projectRoot: string, platform: 'ios' | 'android' = 'ios
     mode: entry.mode,
     routerAppDir: entry.routerAppDir,
   };
-  const mocks = mockRegistryPlugin({
-    projectRoot,
-    mocksDir: paths.mocksDir,
-    runtimeDir: paths.runtimeDir,
-  });
-  const result = await esbuild.build({
-    ...createBuildOptions({
-      key: { projectRoot, platform, target },
-      deps: await resolveRuntimeDeps(projectRoot, paths.vendorDir),
-      paths,
-      getTarget: () => target,
-      mockPlugin: mocks.plugin,
-      sourcemap: false,
-      flowMemory: createFlowStripMemory(),
-      loadStripper: defaultLoadStripper,
-    }),
-    metafile: true,
-  });
-  return {
-    entry,
-    js: result.outputFiles.find((f) => f.path.endsWith('.js'))?.text ?? '',
-    files: Object.keys(result.metafile.inputs).map((f) => f.replace(/\\/g, '/')),
-    mocked: mocks.used(),
-  };
+  return { entry, ...(await buildPreview({ projectRoot, target, platform, paths })) };
 }
 
 describe('app previews (real esbuild)', () => {

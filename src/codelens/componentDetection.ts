@@ -11,14 +11,14 @@ export interface DetectedComponent {
   column: number;
 }
 
-const PASCAL_CASE = /^[A-Z][A-Za-z0-9_]*$/;
+export const PASCAL_CASE = /^[A-Z][A-Za-z0-9_]*$/;
 const WRAPPERS = new Set(['memo', 'forwardRef']);
 const CLASS_BASES = new Set(['Component', 'PureComponent']);
 
-type FunctionNode = t.FunctionDeclaration | t.FunctionExpression | t.ArrowFunctionExpression;
-type Binding = t.Expression | t.FunctionDeclaration | t.ClassDeclaration;
+export type FunctionNode = t.FunctionDeclaration | t.FunctionExpression | t.ArrowFunctionExpression;
+export type Binding = t.Expression | t.FunctionDeclaration | t.ClassDeclaration;
 
-function isFunctionNode(node: t.Node): node is FunctionNode {
+export function isFunctionNode(node: t.Node): node is FunctionNode {
   return (
     node.type === 'FunctionDeclaration' ||
     node.type === 'FunctionExpression' ||
@@ -27,7 +27,7 @@ function isFunctionNode(node: t.Node): node is FunctionNode {
 }
 
 /** Strips TypeScript-only wrappers (`x as T`, `x satisfies T`, `x!`) and parentheses. */
-function unwrapExpression(node: t.Expression): t.Expression {
+export function unwrapExpression(node: t.Expression): t.Expression {
   let current = node;
   for (;;) {
     switch (current.type) {
@@ -68,7 +68,7 @@ function containsJSX(node: t.Node | null | undefined): boolean {
   return false;
 }
 
-function isNode(value: unknown): value is t.Node {
+export function isNode(value: unknown): value is t.Node {
   return !!value && typeof value === 'object' && typeof (value as t.Node).type === 'string';
 }
 
@@ -103,7 +103,7 @@ function functionReturnsJSX(fn: FunctionNode): boolean {
   return bodyReturnsJSX(fn.body);
 }
 
-function wrapperName(callee: t.Node): string | undefined {
+export function wrapperName(callee: t.Node): string | undefined {
   if (callee.type === 'Identifier') {
     return callee.name;
   }
@@ -135,7 +135,7 @@ function isClassComponent(node: t.ClassDeclaration | t.ClassExpression): boolean
   );
 }
 
-class Analyzer {
+export class Analyzer {
   private readonly bindings = new Map<string, Binding>();
   private readonly visiting = new Set<string>();
 

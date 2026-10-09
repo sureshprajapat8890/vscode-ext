@@ -43,6 +43,12 @@
         "icon": "$(eye)"
       },
       {
+        "command": "rnLens.openPreviewToSide",
+        "title": "Open Preview in New Panel",
+        "category": "RN Lens",
+        "icon": "$(split-horizontal)"
+      },
+      {
         "command": "rnLens.previewComponent",
         "title": "Preview Component",
         "category": "RN Lens"
@@ -87,6 +93,10 @@
           "when": "rnLens.isRNProject"
         },
         {
+          "command": "rnLens.openPreviewToSide",
+          "when": "rnLens.isRNProject"
+        },
+        {
           "command": "rnLens.previewComponent",
           "when": "false"
         },
@@ -115,6 +125,11 @@
         {
           "command": "rnLens.openPreview",
           "when": "resourceLangId =~ /(javascript|typescript)react?/ && rnLens.isRNProject",
+          "group": "navigation"
+        },
+        {
+          "command": "rnLens.openPreviewToSide",
+          "when": "activeWebviewPanelId == 'rnLens.preview'",
           "group": "navigation"
         },
         {
@@ -218,9 +233,21 @@
             ]
           },
           {
+            "id": "fastRefresh",
+            "title": "Edit with Fast Refresh",
+            "description": "Save a change and the preview updates in place, keeping component state. Hook changes and edits to non-component modules remount.\n[Update while typing](command:workbench.action.openSettings?%5B%22rnLens.updateMode%22%5D)",
+            "media": {
+              "markdown": "media/walkthrough/fast-refresh.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:rnLens.updateMode",
+              "onCommand:rnLens.reload"
+            ]
+          },
+          {
             "id": "addVariant",
-            "title": "Add a variant",
-            "description": "Create `<Name>.preview.tsx` next to your component. Every named export becomes a variant in the preview toolbar.",
+            "title": "Add variants",
+            "description": "Add states to pick from in the preview toolbar: named exports of `<Name>.preview.tsx`, an `export const previews = { … }` object of props, or Storybook CSF3 stories in `<Name>.stories.tsx`.",
             "media": {
               "markdown": "media/walkthrough/add-variant.md"
             },
@@ -238,6 +265,39 @@
             "completionEvents": [
               "onContext:rnLens.hasDecorators"
             ]
+          },
+          {
+            "id": "sideBySide",
+            "title": "Compare devices side by side",
+            "description": "Open the same component in a second panel and give each panel its own device.\n[Open Preview in New Panel](command:rnLens.openPreviewToSide)",
+            "media": {
+              "markdown": "media/walkthrough/side-by-side.md"
+            },
+            "completionEvents": [
+              "onCommand:rnLens.openPreviewToSide"
+            ]
+          },
+          {
+            "id": "previewApp",
+            "title": "Preview your whole app",
+            "description": "Render the whole app from its entry, with navigation, and switch between iOS and Android files.\n[Preview App](command:rnLens.previewApp)",
+            "media": {
+              "markdown": "media/walkthrough/preview-app.md"
+            },
+            "completionEvents": [
+              "onCommand:rnLens.previewApp"
+            ]
+          },
+          {
+            "id": "mocks",
+            "title": "Mock native modules",
+            "description": "Native-only packages are mocked automatically. Choose **Create mock for …** on the warning to decide what one returns.",
+            "media": {
+              "markdown": "media/walkthrough/mocks.md"
+            },
+            "completionEvents": [
+              "onCommand:rnLens.createMock"
+            ]
           }
         ]
       }
@@ -253,6 +313,7 @@
     "test:coverage": "vitest run --coverage",
     "pretest:integration": "node esbuild.extension.mjs && node esbuild.extension.mjs --tests",
     "test:integration": "node out/test/integration/runTest.js",
+    "bench": "node esbuild.extension.mjs --production && node esbuild.extension.mjs --bench && node out/test/bench/runBench.js",
     "package": "vsce package",
     "postinstall": "npm ci --prefix vendor --ignore-scripts --no-audit --no-fund"
   },

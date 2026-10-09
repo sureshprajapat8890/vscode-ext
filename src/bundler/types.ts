@@ -1,13 +1,17 @@
+import type { ModuleRecord } from './refresh/hotPlan';
+
 export type SimulatedPlatform = 'ios' | 'android' | 'web';
 
 export interface VariantRef {
   /**
    * `file`: a named export of the colocated `<Name>.preview.*` file (a zero-argument component).
    * `props`: a key of the component file's own `export const previews = { … }` (props to render
-   * the component with). Defaults to `file`.
+   * the component with).
+   * `story`: a named export (story) of the colocated Storybook CSF file `<Name>.stories.*`.
+   * Defaults to `file`.
    */
-  kind?: 'file' | 'props';
-  /** Absolute path of the `.preview.*` file, or of the component file for `props` variants. */
+  kind?: 'file' | 'props' | 'story';
+  /** Absolute path of the `.preview.*` or `.stories.*` file, or the component file for `props`. */
   file: string;
   /** Variant name. */
   name: string;
@@ -63,9 +67,19 @@ export interface MockedPackage {
 
 export interface BundleSuccess {
   ok: true;
-  code: string;
-  css: string;
+  /** The project's own code: rebuilt and (hot-)re-run on every change. */
+  app: { code: string; css: string };
+  /** Everything else; `version` changes only when the vendor bundle was rebuilt. */
+  vendor: { version: string; code: string; css: string };
+  /** Hash of the virtual entry's source; a change means the webview must remount. */
+  entryHash: string | undefined;
+  /** The project modules in the app bundle, for planning hot updates (see planDelivery). */
+  modules: ReadonlyMap<string, ModuleRecord>;
+  /** Reverse import graph of the app bundle: module → modules importing it. */
+  importers: ReadonlyMap<string, readonly string[]>;
   buildMs: number;
+  /** Modules bundled: the app bundle's plus the vendor bundle's. */
+  moduleCount: number;
   warnings: BuildMessage[];
   mocked: MockedPackage[];
 }

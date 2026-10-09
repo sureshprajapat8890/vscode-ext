@@ -41,6 +41,8 @@ export interface RNLensApi {
   /** Only present when the extension runs under the VS Code test runner. */
   testing?: {
     snapshot(): Promise<PreviewSnapshot | undefined>;
+    /** Snapshots of every open panel, oldest first. */
+    snapshotAll(): Promise<(PreviewSnapshot | undefined)[]>;
     clickOverlayFrame(index: number): void;
     press(text: string): void;
     selectVariant(name: string | null): Promise<void>;
@@ -50,6 +52,10 @@ export interface RNLensApi {
     buildTimes(): readonly number[];
     setEnv(env: PreviewEnvOverride): void;
     contextCount(): number;
+    /** Modules (project and dependencies) in the active panel's last successful build. */
+    moduleCount(): number | undefined;
+    activationMs(): number;
+    panelCount(): number;
     closePreview(): Promise<void>;
     recentLog(): readonly string[];
   };
@@ -81,7 +87,12 @@ function readUnsaved(file: string): string | undefined {
   return doc?.getText();
 }
 
+/** Milliseconds from loading the bundle to the end of `activate` (PRD target: < 200 ms). */
+let activationMs = 0;
+
 export function activate(context: vscode.ExtensionContext): RNLensApi {
+  const loadStart =
+    (globalThis as { __RNLENS_LOAD_START__?: number }).__RNLENS_LOAD_START__ ?? performance.now();
   const log = getLog();
   log.info(`RN Lens ${String(context.extension.packageJSON.version)} activating`);
 
@@ -120,6 +131,38 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
   );
   const codeLenses = new ComponentCodeLensProvider(projects);
 
+  /** Previews the default component of `uri` (or the active editor's file). */
+  async function openPreview(uri: vscode.Uri | undefined, newPanel: boolean): Promise<void> {
+    const target = uri instanceof vscode.Uri ? uri : vscode.window.activeTextEditor?.document.uri;
+    if (!target) {
+      throw new UserError(
+        'No file is open, so there is nothing to preview. Open a component file and run "RN Lens: Open Preview" again.',
+      );
+    }
+    const doc = await vscode.workspace.openTextDocument(target);
+    const name = path.basename(target.fsPath);
+    if (!PREVIEWABLE_LANGUAGES.has(doc.languageId)) {
+      throw new UserError(
+        `${name} isn't a JavaScript or TypeScript file, so RN Lens can't preview it. Open a .js, .jsx, .ts or .tsx component file.`,
+      );
+    }
+    const component = pickDefaultComponent(detectComponents(doc.getText()));
+    if (!component) {
+      throw new UserError(
+        `No exported React component was found in ${name}. RN Lens previews a default export, or exported ` +
+          'PascalCase components that return JSX. Export a component from this file, or open a different one.',
+      );
+    }
+    await previews.show(
+      {
+        file: target,
+        exportName: component.exportName,
+        label: componentLabel(target, component.exportName, component.localName),
+      },
+      { newPanel },
+    );
+  }
+
   context.subscriptions.push(
     status,
     mockDiagnostics,
@@ -153,33 +196,13 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
     previews,
     { dispose: () => void bundler.dispose() },
 
-    safeCommand('rnLens.openPreview', async (uri?: vscode.Uri) => {
-      const target = uri instanceof vscode.Uri ? uri : vscode.window.activeTextEditor?.document.uri;
-      if (!target) {
-        throw new UserError(
-          'No file is open, so there is nothing to preview. Open a component file and run "RN Lens: Open Preview" again.',
-        );
-      }
-      const doc = await vscode.workspace.openTextDocument(target);
-      const name = path.basename(target.fsPath);
-      if (!PREVIEWABLE_LANGUAGES.has(doc.languageId)) {
-        throw new UserError(
-          `${name} isn't a JavaScript or TypeScript file, so RN Lens can't preview it. Open a .js, .jsx, .ts or .tsx component file.`,
-        );
-      }
-      const component = pickDefaultComponent(detectComponents(doc.getText()));
-      if (!component) {
-        throw new UserError(
-          `No exported React component was found in ${name}. RN Lens previews a default export, or exported ` +
-            'PascalCase components that return JSX. Export a component from this file, or open a different one.',
-        );
-      }
-      await previews.show({
-        file: target,
-        exportName: component.exportName,
-        label: componentLabel(target, component.exportName, component.localName),
-      });
-    }),
+    safeCommand('rnLens.openPreview', (uri?: vscode.Uri) => openPreview(uri, false)),
+    safeCommand('rnLens.openPreviewToSide', (uri?: vscode.Uri) =>
+      // From a focused preview (its title bar button): the same component in another panel.
+      !(uri instanceof vscode.Uri) && previews.hasFocus
+        ? previews.duplicateActive()
+        : openPreview(uri, true),
+    ),
 
     safeCommand('rnLens.previewComponent', async (uri: vscode.Uri | string, exportName: string) => {
       const file = typeof uri === 'string' ? vscode.Uri.parse(uri) : uri;
@@ -203,7 +226,7 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
           'No RN Lens preview is open, so there is nothing to lock. Open a preview first.',
         );
       }
-      const locked = await previews.toggleLock();
+      const locked = previews.toggleLock();
       void vscode.window.setStatusBarMessage(
         locked ? 'RN Lens: preview locked' : 'RN Lens: preview follows the active editor',
         3000,
@@ -259,6 +282,7 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
   if (context.extensionMode === vscode.ExtensionMode.Test) {
     api.testing = {
       snapshot: () => previews.snapshot(),
+      snapshotAll: () => previews.snapshotAll(),
       clickOverlayFrame: (index) => previews.clickOverlayFrame(index),
       press: (text) => previews.press(text),
       selectVariant: (name) => previews.selectVariantForTest(name),
@@ -268,10 +292,15 @@ export function activate(context: vscode.ExtensionContext): RNLensApi {
       buildTimes: () => previews.buildTimes,
       setEnv: (env) => previews.setEnv(env),
       contextCount: () => bundler.contextCount,
+      moduleCount: () => previews.moduleCount,
+      activationMs: () => activationMs,
+      panelCount: () => previews.panelCount,
       closePreview: () => previews.close(),
       recentLog: () => recentLogLines(),
     };
   }
+  activationMs = Math.round(performance.now() - loadStart);
+  log.debug(`Activated in ${activationMs} ms`);
   return api;
 }
 

@@ -4,6 +4,26 @@ All notable changes to RN Lens are documented here. This project follows [Semant
 
 ## [Unreleased]
 
+### Phase 4 — 1.0
+
+- **React Fast Refresh.** Saving a component updates the preview in place and keeps its state: a counter's `useState`, the current screen of an app.
+  - Each preview is now two bundles. The **app bundle** holds your own code and is rebuilt on every change. The **vendor bundle** holds React, react-native-web, mocks and libraries, and is rebuilt only when your code starts importing something new.
+  - Hook changes remount the component.
+  - Edits to modules that export more than components re-run their importers.
+  - Changes that reach the app's entry file reload the preview.
+  - The toolbar shows ⚡ for a hot update and ✓ for a full reload.
+- **Multiple panels.** **RN Lens: Open Preview in New Panel** (also in a preview's title bar) opens another preview beside the first, e.g. iPhone and Pixel side by side.
+  - Each panel has its own device, platform, variant and lock.
+  - Panels showing the same component share one build, which is disposed when the last of them closes.
+- **Storybook CSF3.** A colocated `<Name>.stories.tsx` contributes its stories as variants. Meta and story `args`, `render`, decorators, CSF2 story functions and `includeStories` / `excludeStories` are supported.
+- **Walkthrough.** *Get started with RN Lens* now covers Fast Refresh, variants (including stories), decorators, side-by-side devices, the app preview and mocks.
+- **Docs.** `docs/ARCHITECTURE.md`, `docs/KNOWN_DIFFERENCES.md` and `docs/WRITING_MOCKS.md`.
+- **`npm run bench`.** Measures the PRD performance targets in VS Code and prints a table. CI runs it on Linux and adds the table to the job summary.
+- Faster warm rebuilds: unchanged project files aren't re-transformed.
+- The output channel logs how many modules each build bundled, and whether it was applied as a hot update or a full reload.
+- Re-opening a preview, **Reload** and **Clear Cache** always start the preview fresh.
+- Fixed: `onType` mode didn't use unsaved contents of files at the project root (e.g. `App.tsx`).
+
 ### Phase 3 — Beta
 
 - **RN Lens: Preview App**: runs the whole app. The entry comes from `rnLens.entry`, expo-router, package.json `main`, `index.*` (platform-specific first) or `App.*`. It works with `AppRegistry`, Expo's `registerRootComponent` and **expo-router**; for expo-router, RN Lens generates the route context Metro would build with `require.context`. React Navigation apps are navigable in the preview.

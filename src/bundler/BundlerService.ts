@@ -2,22 +2,29 @@ import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import type * as esbuildApi from 'esbuild';
-import type { BuildContext, BuildOptions, Message } from 'esbuild';
+import type { BuildContext, BuildOptions, Message, Metafile } from 'esbuild';
 import { EMPTY_PROJECT_CONFIG, type ProjectConfig } from '../project/config';
-import { createBuildOptions, type ExtensionPaths } from './buildOptions';
+import {
+  createAppBuildOptions,
+  createVendorBuildOptions,
+  type ExtensionPaths,
+} from './buildOptions';
 import { createFlowStripMemory, type StripFlow } from './plugins/flowStrip';
+import type { VendorRef } from './plugins/externalize';
 import { mockRegistryPlugin, type MockUse } from './plugins/mockRegistry';
+import type { ProjectSourceOptions } from './plugins/projectSource';
+import type { ModuleRecord } from './refresh/hotPlan';
 import { resolveRuntimeDeps, type RuntimeDeps } from './runtimeDeps';
 import {
   bundleKeyId,
   type BuildMessage,
   type BundleKey,
   type BundleResult,
-  type BundleSuccess,
+  type MockedPackage,
   type PreviewTarget,
 } from './types';
 
-type Esbuild = Pick<typeof esbuildApi, 'context'>;
+type Esbuild = Pick<typeof esbuildApi, 'context' | 'transform'>;
 type Context = BuildContext<BuildOptions & { write: false }>;
 
 export interface BundlerServiceOptions extends ExtensionPaths {
@@ -34,18 +41,46 @@ export interface BundlerServiceOptions extends ExtensionPaths {
   onProjectNote?: (message: string) => void;
 }
 
+interface VendorBuild {
+  version: string;
+  code: string;
+  css: string;
+  /** How many vendor keys it was built with (keys only ever grow). */
+  keyCount: number;
+  moduleCount: number;
+  mocksUsed: MockUse[];
+}
+
 interface Entry {
-  context: Promise<Context>;
-  /** Latest target requested for this context (variants may change between builds). */
+  /** Target of the build in progress (variants may change between builds). */
   current: { target: PreviewTarget };
-  mocksUsed: () => MockUse[];
+  app: Promise<Context>;
+  vendor: Promise<Context> | undefined;
+  vendorKeys: Map<string, VendorRef>;
+  vendorBuild: VendorBuild | undefined;
+  appMocksUsed: () => MockUse[];
+  vendorMocksUsed: () => MockUse[];
   /** Bare imports that failed to resolve in an earlier build; auto-mocked from then on. */
   unresolved: Set<string>;
-  /** Second context emitting source maps, created on the first runtime error that needs one. */
-  mapContext: Promise<Context> | undefined;
-  running: Promise<BundleResult> | undefined;
-  queued: Promise<BundleResult> | undefined;
+  transformCache: ProjectSourceOptions['cache'];
+  /** Filled in while an app build runs. */
+  building: { modules: Map<string, ModuleRecord>; entrySource: string | undefined } | undefined;
+  /** Contexts emitting source maps, created on the first runtime error that needs one. */
+  appMap: Promise<Context> | undefined;
+  vendorMap: Promise<Context> | undefined;
+  /** Builds waiting for the one in progress, one per target (variants share an entry). */
+  queued: Map<string, Promise<BundleResult>>;
+  /** The most recently scheduled build; builds run one after another. */
+  tail: Promise<BundleResult> | undefined;
 }
+
+export interface MappedBundle {
+  map: string;
+  fingerprint: string;
+}
+
+/** Owner of builds requested without one (single-consumer callers and tests). */
+const DEFAULT_OWNER = {};
 
 /** How many times a build may be retried after auto-mocking newly found missing packages. */
 const MAX_MISSING_PACKAGE_RETRIES = 3;
@@ -92,18 +127,57 @@ export function bundleFingerprint(code: string): string {
   return createHash('sha1').update(withoutMapComment).digest('hex');
 }
 
+/** Real modules in a build (esbuild also lists `define` values as inputs). */
+function countModules(metafile: Metafile | undefined): number {
+  return Object.keys(metafile?.inputs ?? {}).filter((i) => !i.startsWith('<define:')).length;
+}
+
+/** Reverse import graph of an app build's metafile: module → modules importing it (absolute). */
+export function importersFrom(metafile: Metafile, projectRoot: string): Map<string, string[]> {
+  const toId = (p: string): string =>
+    /^[a-z-]+:/i.test(p) && !/^[a-z]:[\\/]/i.test(p) ? p : path.resolve(projectRoot, p);
+  const importers = new Map<string, string[]>();
+  for (const [input, info] of Object.entries(metafile.inputs)) {
+    for (const imp of info.imports) {
+      if (imp.external) continue;
+      const target = toId(imp.path);
+      importers.set(target, [...(importers.get(target) ?? []), toId(input)]);
+    }
+  }
+  return importers;
+}
+
+function mergeMocks(...lists: MockUse[][]): MockedPackage[] {
+  const merged = new Map<string, MockedPackage>();
+  for (const list of lists) {
+    for (const { specifier, source, note, importers } of list) {
+      const existing = merged.get(specifier);
+      if (existing) {
+        existing.importers = [...new Set([...(existing.importers ?? []), ...importers])];
+      } else {
+        merged.set(specifier, { specifier, source, note, importers: [...importers] });
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
 export const defaultLoadStripper = async (): Promise<StripFlow> => {
   const { default: flowRemoveTypes } = await import('flow-remove-types');
   return (source) => flowRemoveTypes(source, { all: true }).toString();
 };
 
 /**
- * Owns one esbuild context per (project, target, platform). Rebuilds requested while one is
- * running are coalesced into a single follow-up build, so the newest file contents always win
- * and no more than two builds per key are ever outstanding.
+ * Owns the esbuild contexts of each (project, target, platform): an app bundle (the project's own
+ * code, rebuilt on every change and applied with React Fast Refresh) and a vendor bundle
+ * (everything else, rebuilt only when the app starts using new modules). Rebuilds requested while
+ * one is running are coalesced into a single follow-up build per target, so the newest contents
+ * win. Entries are shared by every owner (preview panel) showing the same target.
  */
 export class BundlerService {
   private readonly entries = new Map<string, Entry>();
+  /** Who uses each entry; kept across `reset` so a restarted entry stays shared. */
+  private readonly owners = new Map<string, Set<object>>();
   private readonly deps = new Map<string, Promise<RuntimeDeps>>();
   private readonly configs = new Map<string, Promise<ProjectConfig>>();
   private flowMemory = createFlowStripMemory();
@@ -111,65 +185,75 @@ export class BundlerService {
 
   constructor(private readonly options: BundlerServiceOptions) {}
 
+  /** Live (project, target, platform) entries, each holding an app and a vendor context. */
   get contextCount(): number {
     return this.entries.size;
   }
 
-  /** Builds (or rebuilds) the bundle for `key`. Never rejects: failures are returned as results. */
-  build(key: BundleKey): Promise<BundleResult> {
+  /**
+   * Builds (or rebuilds) the bundles for `key` on behalf of `owner` (e.g. a preview panel; panels
+   * showing the same target share contexts). Never rejects: failures are returned as results.
+   */
+  build(key: BundleKey, owner: object = DEFAULT_OWNER): Promise<BundleResult> {
     const id = bundleKeyId(key);
+    let owners = this.owners.get(id);
+    if (!owners) this.owners.set(id, (owners = new Set()));
+    owners.add(owner);
     let entry = this.entries.get(id);
     if (!entry) {
       const created: Entry = {
         current: { target: key.target },
-        context: Promise.reject(new Error('not started')),
-        mocksUsed: () => [],
+        app: Promise.reject(new Error('not started')),
+        vendor: undefined,
+        vendorKeys: new Map(),
+        vendorBuild: undefined,
+        appMocksUsed: () => [],
+        vendorMocksUsed: () => [],
         unresolved: new Set(),
-        mapContext: undefined,
-        running: undefined,
-        queued: undefined,
+        transformCache: new Map(),
+        building: undefined,
+        appMap: undefined,
+        vendorMap: undefined,
+        queued: new Map(),
+        tail: undefined,
       };
-      created.context.catch(() => undefined);
+      created.app.catch(() => undefined);
       this.entries.set(id, created);
-      this.startContext(created, key, id);
+      this.startContexts(created, key, id);
       entry = created;
     }
-    entry.current.target = key.target;
     return this.schedule(entry, key);
   }
 
   /**
-   * Rebuilds the current target with a source map (in a separate, lazily created context, so
-   * normal rebuilds skip map generation). Returns undefined if no context exists or the build fails.
-   * Callers should compare `fingerprint` with the running bundle's before trusting the map.
+   * Rebuilds the current bundles with source maps (in separate, lazily created contexts, so normal
+   * rebuilds skip map generation). Callers should compare each `fingerprint` with the running
+   * bundle's before trusting a map.
    */
-  async sourceMapFor(key: BundleKey): Promise<{ map: string; fingerprint: string } | undefined> {
+  async sourceMapsFor(key: BundleKey): Promise<{ app?: MappedBundle; vendor?: MappedBundle }> {
     const entry = this.entries.get(bundleKeyId(key));
-    if (!entry) return undefined;
-    entry.mapContext ??= this.createContext(entry, key, true);
-    let context: Context;
-    try {
-      context = await entry.mapContext;
-    } catch {
-      // The context never started; try again next time.
-      entry.mapContext = undefined;
-      return undefined;
-    }
-    try {
-      const result = await context.rebuild();
-      const code = result.outputFiles.find((f) => f.path.endsWith('.js'))?.text;
-      const map = result.outputFiles.find((f) => f.path.endsWith('.js.map'))?.text;
-      return code !== undefined && map !== undefined
-        ? { map, fingerprint: bundleFingerprint(code) }
-        : undefined;
-    } catch {
-      // A failed build (e.g. a syntax error introduced since) leaves the context usable.
-      return undefined;
-    }
+    if (!entry) return {};
+    entry.appMap ??= this.createAppContext(entry, key, true, new Map());
+    entry.vendorMap ??= this.createVendorContext(entry, key, true);
+    const [app, vendor] = await Promise.all([
+      this.mapFrom(entry, 'appMap'),
+      this.mapFrom(entry, 'vendorMap'),
+    ]);
+    return { app, vendor };
   }
 
-  /** Disposes the context for `key`, if any. */
-  async release(key: BundleKey): Promise<void> {
+  /** `owner` no longer needs `key`; its contexts are disposed once no owner needs them. */
+  async release(key: BundleKey, owner: object = DEFAULT_OWNER): Promise<void> {
+    const id = bundleKeyId(key);
+    const owners = this.owners.get(id);
+    owners?.delete(owner);
+    if (owners && owners.size > 0) return;
+    this.owners.delete(id);
+    await this.reset(key);
+  }
+
+  /** Disposes the contexts for `key` (if any); the next build starts from scratch. */
+  async reset(key: BundleKey): Promise<void> {
     const id = bundleKeyId(key);
     const entry = this.entries.get(id);
     if (!entry) return;
@@ -193,39 +277,64 @@ export class BundlerService {
   async dispose(): Promise<void> {
     const entries = [...this.entries.values()];
     this.entries.clear();
+    this.owners.clear();
     this.deps.clear();
     this.configs.clear();
     await Promise.all(entries.map((e) => this.disposeEntry(e)));
   }
 
-  /** (Re)creates an entry's main context; a context that fails to start drops the entry. */
-  private startContext(entry: Entry, key: BundleKey, id: string): void {
-    entry.context = this.createContext(entry, key, false);
-    entry.context.catch(() => {
+  private async mapFrom(
+    entry: Entry,
+    which: 'appMap' | 'vendorMap',
+  ): Promise<MappedBundle | undefined> {
+    let context: Context;
+    try {
+      context = (await entry[which]) as Context;
+    } catch {
+      entry[which] = undefined; // never started; try again next time
+      return undefined;
+    }
+    try {
+      const result = await context.rebuild();
+      const code = result.outputFiles.find((f) => f.path.endsWith('.js'))?.text;
+      const map = result.outputFiles.find((f) => f.path.endsWith('.js.map'))?.text;
+      return code !== undefined && map !== undefined
+        ? { map, fingerprint: bundleFingerprint(code) }
+        : undefined;
+    } catch {
+      return undefined; // e.g. a syntax error introduced since; the context stays usable
+    }
+  }
+
+  /** (Re)creates an entry's app context; a context that fails to start drops the entry. */
+  private startContexts(entry: Entry, key: BundleKey, id: string): void {
+    entry.app = this.createAppContext(entry, key, false);
+    entry.vendor = undefined;
+    entry.vendorBuild = undefined;
+    entry.app.catch(() => {
       if (this.entries.get(id) === entry) this.entries.delete(id);
     });
   }
 
+  /**
+   * Runs builds of an entry one at a time. Requests for a target that already has a build waiting
+   * share it: that build reads files when it starts, so it includes every change made so far.
+   */
   private schedule(entry: Entry, key: BundleKey): Promise<BundleResult> {
-    if (entry.queued) {
-      return entry.queued;
-    }
-    if (entry.running) {
-      const queued = entry.running.then(() => {
-        entry.queued = undefined;
-        return this.start(entry, key);
-      });
-      entry.queued = queued;
-      return queued;
-    }
-    return this.start(entry, key);
-  }
-
-  private start(entry: Entry, key: BundleKey): Promise<BundleResult> {
-    const run = this.runOnce(entry, key);
-    entry.running = run;
+    const targetId = JSON.stringify(key.target);
+    const waiting = entry.queued.get(targetId);
+    if (waiting) return waiting;
+    const previous = entry.tail;
+    const run = previous
+      ? previous.then(() => {
+          entry.queued.delete(targetId);
+          return this.runOnce(entry, key);
+        })
+      : this.runOnce(entry, key);
+    if (previous) entry.queued.set(targetId, run);
+    entry.tail = run;
     void run.then(() => {
-      if (entry.running === run) entry.running = undefined;
+      if (entry.tail === run) entry.tail = undefined;
     });
     return run;
   }
@@ -233,29 +342,54 @@ export class BundlerService {
   private async runOnce(entry: Entry, key: BundleKey): Promise<BundleResult> {
     const started = performance.now();
     const elapsed = (): number => Math.round(performance.now() - started);
+    const root = key.projectRoot;
+    entry.current.target = key.target;
     for (let attempt = 0; ; attempt++) {
       try {
-        const ctx = await entry.context;
-        const result = await ctx.rebuild();
-        const success: BundleSuccess = {
-          ok: true,
-          code: '',
-          css: '',
-          buildMs: 0,
-          warnings: result.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
-          mocked: entry.mocksUsed().map(({ specifier, source, note, importers }) => ({
-            specifier,
-            source,
-            note,
-            importers,
-          })),
+        const app = await entry.app;
+        const building = {
+          modules: new Map<string, ModuleRecord>(),
+          entrySource: undefined as string | undefined,
         };
-        for (const file of result.outputFiles) {
-          if (file.path.endsWith('.js')) success.code = file.text;
-          else if (file.path.endsWith('.css')) success.css = file.text;
+        entry.building = building;
+        const appResult = await app.rebuild().finally(() => {
+          entry.building = undefined;
+        });
+        const { modules, entrySource } = building;
+
+        if (!entry.vendorBuild || entry.vendorBuild.keyCount !== entry.vendorKeys.size) {
+          entry.vendor ??= this.createVendorContext(entry, key, false);
+          const vendorResult = await (await entry.vendor).rebuild();
+          const code = vendorResult.outputFiles.find((f) => f.path.endsWith('.js'))?.text ?? '';
+          entry.vendorBuild = {
+            version: bundleFingerprint(code),
+            code,
+            css: vendorResult.outputFiles.find((f) => f.path.endsWith('.css'))?.text ?? '',
+            keyCount: entry.vendorKeys.size,
+            moduleCount: countModules(vendorResult.metafile),
+            mocksUsed: entry.vendorMocksUsed(),
+          };
         }
-        success.buildMs = elapsed();
-        return success;
+
+        const vendor = entry.vendorBuild;
+        return {
+          ok: true,
+          app: {
+            code: appResult.outputFiles.find((f) => f.path.endsWith('.js'))?.text ?? '',
+            css: appResult.outputFiles.find((f) => f.path.endsWith('.css'))?.text ?? '',
+          },
+          vendor: { version: vendor.version, code: vendor.code, css: vendor.css },
+          entryHash:
+            entrySource === undefined
+              ? undefined
+              : createHash('sha1').update(entrySource).digest('hex'),
+          modules,
+          importers: importersFrom(appResult.metafile ?? { inputs: {}, outputs: {} }, root),
+          buildMs: elapsed(),
+          moduleCount: countModules(appResult.metafile) + vendor.moduleCount,
+          warnings: appResult.warnings.map((w) => toBuildMessage(w, root)),
+          mocked: mergeMocks(entry.appMocksUsed(), vendor.mocksUsed),
+        };
       } catch (err) {
         if (isEsbuildFailure(err)) {
           // Packages that aren't installed (often optional native dependencies) become
@@ -263,18 +397,17 @@ export class BundlerService {
           const missing = missingPackages(err.errors)?.filter((s) => !entry.unresolved.has(s));
           if (missing && missing.length > 0 && attempt < MAX_MISSING_PACKAGE_RETRIES) {
             for (const s of missing) entry.unresolved.add(s);
-            const old = entry;
-            const previous = old.context;
-            const previousMap = old.mapContext;
-            old.mapContext = undefined;
-            this.startContext(old, key, bundleKeyId(key));
-            void this.disposeContexts([previous, previousMap]);
+            const previous = [entry.app, entry.vendor, entry.appMap, entry.vendorMap];
+            entry.appMap = undefined;
+            entry.vendorMap = undefined;
+            this.startContexts(entry, key, bundleKeyId(key));
+            void this.disposeContexts(previous);
             continue;
           }
           return {
             ok: false,
-            errors: err.errors.map((e) => toBuildMessage(e, key.projectRoot)),
-            warnings: err.warnings.map((w) => toBuildMessage(w, key.projectRoot)),
+            errors: err.errors.map((e) => toBuildMessage(e, root)),
+            warnings: err.warnings.map((w) => toBuildMessage(w, root)),
             buildMs: elapsed(),
           };
         }
@@ -288,23 +421,36 @@ export class BundlerService {
     }
   }
 
-  private async createContext(entry: Entry, key: BundleKey, sourcemap: boolean): Promise<Context> {
-    const [esbuild, deps, config] = await Promise.all([
+  private async loadContextInputs(projectRoot: string) {
+    return Promise.all([
       this.loadEsbuild(),
-      this.depsFor(key.projectRoot),
-      this.configFor(key.projectRoot),
+      this.depsFor(projectRoot),
+      this.configFor(projectRoot),
     ]);
-    const { vendorDir, runtimeDir, mocksDir, cacheDir } = this.options;
-    const mocks = mockRegistryPlugin({
+  }
+
+  private mockPlugin(entry: Entry, key: BundleKey, config: ProjectConfig) {
+    return mockRegistryPlugin({
       projectRoot: key.projectRoot,
-      mocksDir,
-      runtimeDir,
+      mocksDir: this.options.mocksDir,
+      runtimeDir: this.options.runtimeDir,
       configMocks: config.mocks,
       unresolved: entry.unresolved,
     });
-    if (!sourcemap) entry.mocksUsed = mocks.used;
+  }
+
+  private async createAppContext(
+    entry: Entry,
+    key: BundleKey,
+    sourcemap: boolean,
+    vendorKeys: Map<string, VendorRef> = entry.vendorKeys,
+  ): Promise<Context> {
+    const [esbuild, deps, config] = await this.loadContextInputs(key.projectRoot);
+    const mocks = this.mockPlugin(entry, key, config);
+    if (!sourcemap) entry.appMocksUsed = mocks.used;
+    const { vendorDir, runtimeDir, mocksDir, cacheDir } = this.options;
     return esbuild.context(
-      createBuildOptions({
+      createAppBuildOptions({
         key,
         deps,
         paths: { vendorDir, runtimeDir, mocksDir, cacheDir },
@@ -312,9 +458,41 @@ export class BundlerService {
         getTarget: () => entry.current.target,
         mockPlugin: mocks.plugin,
         sourcemap,
+        vendorKeys,
+        transform: (source, options) => esbuild.transform(source, options),
+        transformCache: entry.transformCache,
+        onModule: (file, record) => {
+          if (!sourcemap) entry.building?.modules.set(file, record);
+        },
+        onEntry: (source) => {
+          if (!sourcemap && entry.building) entry.building.entrySource = source;
+        },
+        readUnsaved: this.options.readUnsaved,
+      }),
+    );
+  }
+
+  private async createVendorContext(
+    entry: Entry,
+    key: BundleKey,
+    sourcemap: boolean,
+  ): Promise<Context> {
+    const [esbuild, deps, config] = await this.loadContextInputs(key.projectRoot);
+    const mocks = this.mockPlugin(entry, key, config);
+    if (!sourcemap) entry.vendorMocksUsed = mocks.used;
+    const { vendorDir, runtimeDir, mocksDir, cacheDir } = this.options;
+    return esbuild.context(
+      createVendorBuildOptions({
+        key,
+        deps,
+        paths: { vendorDir, runtimeDir, mocksDir, cacheDir },
+        config,
+        getTarget: () => entry.current.target,
+        mockPlugin: mocks.plugin,
+        sourcemap,
+        getVendorKeys: () => entry.vendorKeys,
         flowMemory: this.flowMemory,
         loadStripper: this.options.loadStripper ?? defaultLoadStripper,
-        readUnsaved: this.options.readUnsaved,
       }),
     );
   }
@@ -365,6 +543,6 @@ export class BundlerService {
   }
 
   private disposeEntry(entry: Entry): Promise<void> {
-    return this.disposeContexts([entry.context, entry.mapContext]);
+    return this.disposeContexts([entry.app, entry.vendor, entry.appMap, entry.vendorMap]);
   }
 }

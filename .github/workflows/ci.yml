@@ -45,6 +45,21 @@ jobs:
       - name: Integration tests
         if: runner.os != 'Linux'
         run: npm run test:integration
+      # Shared runners are noisy, so a missed target is reported, not fatal.
+      - name: Benchmark (PRD §7 targets)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          xvfb-run -a npm run bench 2>&1 | tee bench.txt
+      - name: Benchmark summary
+        if: runner.os == 'Linux' && always()
+        shell: bash
+        run: |
+          if [ -f bench.txt ]; then
+            sed -n '/RN Lens NFR benchmark/,$p' bench.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   package:
     name: package (${{ matrix.target }})

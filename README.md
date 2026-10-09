@@ -12,12 +12,13 @@ RN Lens compiles your React Native code to the web on the fly (esbuild + [react-
 
 - ▶ **One-click preview** — CodeLens above every exported component, or the 👁 button in the editor title bar. The preview follows the file you're editing; 🔒 lock it to keep one component in view.
 - 📲 **Whole-app preview** — **RN Lens: Preview App** runs your app entry: `AppRegistry.registerComponent`, Expo's `registerRootComponent`, or **expo-router** (file-based routes). React Navigation works, including navigating between screens.
-- ⚡ **Fast rebuilds** — incremental esbuild; typically < 300 ms after save.
+- ⚡ **Fast Refresh** — saving a component updates the preview in place and keeps its state (a counter's `useState`, the current screen). Only your own code is rebuilt; typically < 300 ms from save to screen.
+- 🪟 **Side-by-side panels** — **RN Lens: Open Preview in New Panel** opens more previews, e.g. iPhone and Pixel next to each other. Panels showing the same component share one build.
 - 📱 **Device frames** — iPhone SE / 15 / 15 Pro Max, Pixel 8, Galaxy S24, iPad, or custom size; portrait/landscape; zoom.
 - 🌗 **Light / dark** mode toggle wired to `useColorScheme()`.
 - 🍎🤖 **Simulated platform** — switch iOS / Android / Web in the toolbar (default: `rnLens.simulatedPlatform`) so `Platform.OS`, `Platform.select`, and your `.ios.tsx` / `.android.tsx` files resolve correctly.
 - ⌨️ **Update while typing** — set `rnLens.updateMode` to `onType` to rebuild from unsaved editor contents.
-- 🎛 **Variants** — preview a component with different props via `*.preview.tsx` files or a `previews` object.
+- 🎛 **Variants** — preview a component with different props via `*.preview.tsx` files, a `previews` object, or your existing Storybook `*.stories.tsx` (CSF3).
 - 🧩 **Decorators** — wrap all previews in your providers (theme, Redux/Zustand, i18n, NavigationContainer).
 - 🧯 **Error overlay** — source-mapped stack traces; click to jump to the line.
 - 🪵 **Console forwarding** — `console.log` shows up in the *RN Lens* output channel.
@@ -68,7 +69,18 @@ export const previews = {
 };
 ```
 
-A flat `previews` object applies to the file's default export (or, without one, its first exported component). For files with several components, key it by export name: `{ Button: { Primary: { … } }, Card: { … } }`. If a `.preview` file and `previews` both define a variant with the same name, the `.preview` file wins.
+A flat `previews` object applies to the file's default export (or, without one, its first exported component). For files with several components, key it by export name: `{ Button: { Primary: { … } }, Card: { … } }`.
+
+Already have Storybook stories? A `Button.stories.tsx` next to `Button.tsx` is read too: every story is a variant, with its `args` (merged over the meta's), `render` and `decorators` applied. CSF2 story functions work as well. `loaders` and `play` functions don't run.
+
+```tsx
+// components/Button.stories.tsx
+export default { component: Button, args: { title: 'Continue' } };
+export const Disabled = { args: { disabled: true } };
+export const Wide = { render: (args) => <View style={{ width: 320 }}><Button {...args} /></View> };
+```
+
+When sources share a variant name, the `.preview` file wins, then `previews`, then the stories.
 
 ## Decorators (global providers)
 
@@ -90,7 +102,7 @@ export default function Decorators({ children }: { children: React.ReactNode }) 
 
 If a component imports something that only exists on iOS/Android, RN Lens replaces it and shows a **⚠ N mocked** badge in the panel toolbar (details in the *RN Lens* output). Built-in mocks cover `@react-native-async-storage/async-storage` (backed by localStorage), `react-native-device-info`, `react-native-haptic-feedback`, `expo-haptics`, `react-native-safe-area-context` (insets of the simulated device), `react-native-vector-icons` (uses `@expo/vector-icons` when installed, placeholders otherwise), `expo-constants`, `expo-status-bar`, `expo-splash-screen` and `react-native-config` (values from `.env`). Packages that aren't installed, `react-native/Libraries/*` imports, Node built-ins, `TurboModuleRegistry` modules, `requireNativeComponent` views and unknown `NativeModules.*` become no-op mocks with a warning. React Native APIs that react-native-web lacks (`PlatformColor`, `PermissionsAndroid`, `ToastAndroid`, `useAnimatedValue`, …) are shimmed. `react-native-reanimated` and `react-native-gesture-handler` use their web builds.
 
-Add your own by creating `.rnlens/mocks/<package-name>.ts(x)`. Scoped packages use folders:
+Add your own by creating `.rnlens/mocks/<package-name>.ts(x)` (full guide: [docs/WRITING_MOCKS.md](./docs/WRITING_MOCKS.md)). Scoped packages use folders:
 
 ```ts
 // .rnlens/mocks/react-native-biometrics.ts
@@ -111,8 +123,9 @@ When a package you import is replaced with a no-op mock, its import line gets a 
 | Command | Description |
 |---|---|
 | `RN Lens: Open Preview` | Preview the active file's default (or first) exported component |
+| `RN Lens: Open Preview in New Panel` | Preview in an additional panel, e.g. iPhone and Pixel side by side (from a preview's title bar: the same component again) |
 | `RN Lens: Preview App` | Preview the whole app: `rnLens.entry`, expo-router, package.json `main`, `index.*`, or `App.*` |
-| `RN Lens: Reload` | Force rebuild and reload |
+| `RN Lens: Reload` | Restart the build and remount the preview (state is reset) |
 | `RN Lens: Toggle Lock` | Keep the current preview while editing other files (also 🔒 in the preview toolbar and title bar) |
 | `RN Lens: Clear Cache` | Clear the build cache |
 | `RN Lens: Show Output` | Open the *RN Lens* output channel (also: click the status bar item) |
@@ -146,11 +159,14 @@ Saving any of these rebuilds the preview from scratch: `package.json`, `app.json
 
 ## Known limitations
 
+The full list, with what to check on a device, is in [docs/KNOWN_DIFFERENCES.md](./docs/KNOWN_DIFFERENCES.md).
+
 - Native modules don't run; they're mocked.
 - Text metrics, shadows (`elevation`, `shadow*`), and some fonts can differ slightly from devices.
 - Libraries without a web implementation need a mock.
 - Performance in the preview is not representative of device performance.
-- Fast Refresh (state-preserving reloads) is planned; v1 reloads the component tree on change.
+- Fast Refresh keeps state when you edit modules that export only components. Edits to other modules (constants, hooks, context) re-run their importers, and a change that reaches the app's entry file reloads the preview.
+- Storybook support covers stories and their args, `render` and decorators. `loaders`, `play` functions, globals and Storybook's `preview.tsx` aren't used; put shared providers in `.rnlens/decorators.tsx`.
 - The simulated platform applies to **your own code**: `Platform.OS`, `Platform.select`, and `.ios` / `.android` / `.native` files.
   - Libraries in `node_modules` see the platform the preview really runs on, `web`. They use `Platform.OS` and `process.env.EXPO_OS` to choose between native and web implementations, and their `.native` / `.ios` files call native modules.
   - React Navigation is the exception: it follows the simulated platform, so headers and tabs take the iOS or Android look.
@@ -173,7 +189,7 @@ RN Lens runs entirely on your machine. No code leaves your computer, and RN Lens
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Product spec: [PRD.md](./PRD.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md). Product spec: [PRD.md](./PRD.md). Design decisions: [docs/DECISIONS.md](./docs/DECISIONS.md).
 
 ## License
 

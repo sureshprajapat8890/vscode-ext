@@ -237,63 +237,137 @@ function reportRuntimeError(error: unknown, componentStack?: string): void {
     shownErrorId = errorId;
     overlay.show('Runtime error', message, stackLines(stack));
   }
-  post({ type: 'runtimeError', errorId, id: runningId, message, stack, componentStack });
+  post({
+    type: 'runtimeError',
+    errorId,
+    id: runningId,
+    message,
+    stack,
+    componentStack,
+    bundleUrls: { app: appUrl, vendor: vendorUrl },
+  });
 }
 
 window.addEventListener('error', (event) => reportRuntimeError(event.error ?? event.message));
 window.addEventListener('unhandledrejection', (event) => reportRuntimeError(event.reason));
 
-let bundleStyle: HTMLStyleElement | undefined;
+/**
+ * Module cache for hot updates. Project modules in the app bundle call `reuse` first: during a hot
+ * update, modules the extension didn't mark for re-execution get their previous exports back, so
+ * unchanged modules (and the React tree's state) survive. `store` records exports after a run.
+ */
+const hot = {
+  updating: false,
+  reexecute: new Set<string>(),
+  modules: new Map<string, unknown>(),
+  reuse(module: { exports: unknown }, id: string): boolean {
+    if (!this.updating || this.reexecute.has(id) || !this.modules.has(id)) return false;
+    module.exports = this.modules.get(id);
+    return true;
+  },
+  store(module: { exports: unknown }, id: string): void {
+    this.modules.set(id, module.exports);
+  },
+};
+(globalThis as { __RNLENS_HOT__?: typeof hot }).__RNLENS_HOT__ = hot;
 
-function runBundle(id: number, code: string, css: string, buildMs: number): void {
+let vendorVersion: string | undefined;
+let vendorUrl: string | undefined;
+let appUrl: string | undefined;
+/** A full run has rendered since the vendor bundle loaded, so hot updates have a tree to patch. */
+let mounted = false;
+const vendorStyle = document.head.appendChild(el('style'));
+const appStyle = document.head.appendChild(el('style'));
+
+/** Runs code as a nonce'd script from a Blob URL; resolves with the URL once it has executed. */
+function runScript(code: string): Promise<string> {
+  const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+  return new Promise((resolve) => {
+    const script = el('script');
+    script.nonce = nonce;
+    script.src = url;
+    script.onload = () => {
+      URL.revokeObjectURL(url);
+      script.remove();
+      resolve(url);
+    };
+    script.onerror = () => {
+      URL.revokeObjectURL(url);
+      script.remove();
+      reportRuntimeError(new Error('The preview bundle could not be loaded.'));
+      resolve(url);
+    };
+    document.body.append(script);
+  });
+}
+
+type BundleMessage = Extract<HostMessage, { type: 'bundle' }>;
+
+async function runBundle(message: BundleMessage): Promise<void> {
+  const needVendor = message.vendor.version !== vendorVersion;
+  if (needVendor && message.vendor.code === undefined) {
+    post({ type: 'requestFullBundle' });
+    return;
+  }
+  // Hot updates need a healthy mounted tree; anything else re-mounts from scratch.
+  const full = needVendor || message.plan.kind === 'full' || runFailed || !mounted;
   overlay.hide();
   shownErrorId = undefined;
   counts.total = counts.warnings = counts.errors = 0;
   toolbar.setConsoleCounts(0, 0, 0);
-  try {
-    globalThis.__RNLENS_UNMOUNT__?.();
-  } catch (err) {
-    // The previous tree is discarded with its DOM below; a failing unmount must not block the new one.
-    console.warn('RN Lens: previous preview failed to unmount', err);
-  }
-  globalThis.__RNLENS_UNMOUNT__ = undefined;
-  host.resetListeners();
-  host.update(envFor());
-  // Each bundle carries its own react-native-web instance, which creates its own stylesheet.
-  document.querySelectorAll('style#react-native-stylesheet').forEach((s) => s.remove());
-
-  const mount = el('div', 'rn-mount');
-  // Expo's registerRootComponent (and index.web.js entries) render into #root.
-  mount.id = 'root';
-  rnRoot.replaceChildren(mount);
-  globalThis.__RNLENS_ROOT__ = mount;
-
-  bundleStyle ??= document.head.appendChild(el('style'));
-  bundleStyle.textContent = css;
-
-  runningId = id;
+  runningId = message.id;
   runFailed = false;
-  const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-  const script = el('script');
-  script.nonce = nonce;
-  script.src = url;
-  script.onload = () => {
-    URL.revokeObjectURL(url);
-    script.remove();
-    requestAnimationFrame(() => {
-      if (runFailed || runningId !== id) return;
-      renderedId = id;
-      toolbar.setStatus(`✓ ${buildMs} ms`);
-      post({ type: 'rendered', id });
-    });
-  };
-  script.onerror = () => {
-    URL.revokeObjectURL(url);
-    script.remove();
-    reportRuntimeError(new Error('The preview bundle could not be loaded.'));
-  };
-  document.body.append(script);
+
+  if (full) {
+    try {
+      globalThis.__RNLENS_UNMOUNT__?.();
+    } catch (err) {
+      // The previous tree is discarded with its DOM below; a failing unmount must not block the new one.
+      console.warn('RN Lens: previous preview failed to unmount', err);
+    }
+    hot.modules.clear();
+    mounted = false;
+    const mount = el('div', 'rn-mount');
+    // Expo's registerRootComponent (and index.web.js entries) render into #root.
+    mount.id = 'root';
+    rnRoot.replaceChildren(mount);
+    globalThis.__RNLENS_ROOT__ = mount;
+  }
+
+  host.update(envFor());
+  if (needVendor) {
+    // A new vendor bundle brings a new React and react-native-web: drop the old one's listeners
+    // and stylesheet before it runs.
+    host.resetListeners();
+    globalThis.__RNLENS_UNMOUNT__ = undefined;
+    document.querySelectorAll('style#react-native-stylesheet').forEach((s) => s.remove());
+    vendorStyle.textContent = message.vendor.css;
+    vendorUrl = await runScript(message.vendor.code as string);
+    vendorVersion = message.vendor.version;
+  }
+
+  appStyle.textContent = message.app.css;
+  hot.updating = !full;
+  hot.reexecute = new Set(message.plan.kind === 'hot' ? message.plan.reexecute : []);
+  // The app bundle is CommonJS: give it the vendor registry as `require`. The wrapper starts on
+  // the bundle's first line, so source map line numbers stay valid.
+  appUrl = await runScript(
+    `(function (require, module, exports) {${message.app.code}
+})(globalThis.__RNLENS_REQUIRE__, { exports: {} }, {});`,
+  );
+  hot.updating = false;
+
+  requestAnimationFrame(() => {
+    if (runFailed || runningId !== message.id) return;
+    mounted = true;
+    renderedId = message.id;
+    toolbar.setStatus(`${full ? '✓' : '⚡'} ${message.buildMs} ms`);
+    post({ type: 'rendered', id: message.id });
+  });
 }
+
+/** Bundles are applied strictly in order (each may wait for scripts to load). */
+let bundleQueue = Promise.resolve();
 
 /**
  * Test hook: clicks the innermost element whose own text is exactly `text`. react-native-web
@@ -337,7 +411,7 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
       platform = message.platform;
       toolbar.setPlatform(platform);
       toolbar.setMocked(message.mocked);
-      runBundle(message.id, message.code, message.css, message.buildMs);
+      bundleQueue = bundleQueue.then(() => runBundle(message));
       break;
     case 'buildError':
       // The last successful render stays mounted underneath the overlay.
